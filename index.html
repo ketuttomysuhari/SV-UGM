@@ -120,6 +120,9 @@
       geocoder:true,baseLayerPicker:true,navigationHelpButton:false,fullscreenButton:true,
       selectionIndicator:false,infoBox:false
     });
+    // Improve pick robustness
+    viewer.scene.pickTranslucentDepth = true;
+    viewer.scene.globe.depthTestAgainstTerrain = false;
     viewer.scene.shadowMap.enabled = true;
     viewer.shadows = true;
     viewer.scene.highDynamicRange = true;
@@ -139,6 +142,18 @@
     // ===================== Helpers =====================
     const pickedInfo = document.getElementById('pickedInfo');
     const statsBox = document.getElementById('stats');
+
+    // Selection via tileset.style using picked properties
+    function escapeRe(s){ return String(s).replace(/[.*+?^${}()|[\]\]/g, '\$&'); }
+    function selectByProps(props){
+      const keysOrder = ['IfcGuid','IFC_GUID','GlobalId','globalId','elementId','id','ID'];
+      let tests = [];
+      for(const k of keysOrder){ if(props[k]){ const v = escapeRe(props[k]); tests.push(`regexp('^${v}$','i').test(\${${k}})`); break; } }
+      if(tests.length===0 && props.Name){ const v = escapeRe(props.Name); tests.push(`regexp('^${v}$','i').test(\${Name})`); }
+      if(!tests.length){ tileset.style = undefined; return; }
+      const conditions = [ [ `(${tests.join(') || (')})`, "color('yellow', 1.0)" ], [ 'true', "color('white', 0.85)" ] ];
+      try{ tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); }catch(e){ console.warn('style error', e); }
+    }
     let lastColored=[]; 
     function clearHighlight(){ for(const f of lastColored){ try{ f.color = Cesium.Color.WHITE; }catch{} } lastColored.length=0; }
     function highlightFeature(f){ try{ f.color = Cesium.Color.YELLOW; lastColored.push(f); }catch{} }
@@ -184,7 +199,11 @@
         viewer.camera.flyTo({destination:Cesium.Cartesian3.fromRadians(carto.longitude,carto.latitude,Math.max(8,h+20)),orientation:{heading:viewer.camera.heading,pitch:Cesium.Math.toRadians(-35),roll:0},duration:0.9});
       }
 
-      const props={}; const pids=(picked.getPropertyIds&&picked.getPropertyIds())||[]; for(const id of pids){ props[id]=picked.getProperty(id); }
+      const props={};
+      const pids=(picked.getPropertyIds&&picked.getPropertyIds())||[];
+      for(const id of pids){ try{ props[id]=picked.getProperty(id); }catch{} }
+      // Persist highlight via tileset.style based on identifier
+      selectByProps(props);
       const ifcGuid=props.IfcGuid||props.IFC_GUID||props.GlobalId||props.globalId||props.elementId;
       const ifcType=props.IfcType||props.ifcClass||props.class||props.Type||props.Category;
       const out=[`# BIM feature`, ifcGuid?`IfcGUID: ${ifcGuid}`:null, ifcType?`Type:    ${ifcType}`:null, `\n# All properties`, JSON.stringify(props,null,2), `\n# Pick position (WGS84)`, coordText].filter(Boolean).join('\n');
