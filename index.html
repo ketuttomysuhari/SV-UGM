@@ -8,12 +8,15 @@
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
   <style>
     html, body, #cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; }
+    /* Fade-in for Cesium container */
+    #cesiumContainer { opacity: 0; transition: opacity .8s ease; }
+    #cesiumContainer.show { opacity: 1; }
     /* UI blocks */
     .ui-left { position:absolute; top:10px; left:10px; z-index:1000; display:flex; gap:8px; align-items:center; }
     .ui-right { position:absolute; top:66px; right:10px; z-index:1000; display:flex; flex-direction:column; gap:8px; }
     .card { background:#ffffffd9; backdrop-filter: blur(6px); border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; box-shadow:0 4px 14px rgba(0,0,0,.08); }
     .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
-    .row input, .row button, .row label, .row select { font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .row input, .row button, .row select { font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
     .row input[type="text"] { padding:6px 8px; border:1px solid #d1d5db; border-radius:8px; min-width:220px; }
     .row button { padding:6px 10px; border:1px solid #d1d5db; background:white; border-radius:8px; cursor:pointer; }
     .row button:hover { background:#f3f4f6; }
@@ -54,7 +57,7 @@
     </div>
   </div>
 
-  <!-- RIGHT: Info & Stats (under geocoder at top-right) -->
+  <!-- RIGHT: Info & Stats -->
   <div class="ui-right">
     <div class="card">
       <div style="font-weight:600; margin-bottom:6px;">Picked feature</div>
@@ -90,18 +93,24 @@
   <div class="logo"><img src="https://sv.ugm.ac.id/wp-content/uploads/sites/27/2021/09/Lambang-UGM-putih.png" alt="logo"/></div>
 
   <script type="module">
-    // ========= Preloader (5s countdown + wait tileset ready) =========
+    // ========= Preloader (5s, non-blocking) =========
     const preEl = document.getElementById('preloader');
     const preFill = document.getElementById('preFill');
     const prePct = document.getElementById('prePct');
-    const prePromise = new Promise((resolve)=>{
-      let pct = 0; const id = setInterval(()=>{
-        pct = Math.min(100, pct + 1); // 100 steps * 50ms = 5000ms
-        preFill.style.width = pct + '%';
-        prePct.textContent = pct + '%';
-        if(pct >= 100){ clearInterval(id); resolve(); }
-      }, 50);
-    });
+    let pct = 0;
+    const preId = setInterval(() => {
+      pct = Math.min(100, pct + 1); // 100 * 50ms = 5000ms
+      preFill.style.width = pct + '%';
+      prePct.textContent = pct + '%';
+      if (pct >= 100) {
+        clearInterval(preId);
+        preEl.classList.add('hide');
+        setTimeout(() => {
+          preEl.remove();
+          document.getElementById('cesiumContainer').classList.add('show');
+        }, 700);
+      }
+    }, 50);
 
     // ===================== Init Cesium =====================
     Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJiNDJhNGIzMy1lYjk1LTQ5MTgtOGIxMy1iMjNkYWFjZTZjZGMiLCJpZCI6MzA1NDUzLCJpYXQiOjE3NDk4ODQ0NjF9.ZzfqWk4Sc_3zrTXoyumAzAVH4QavWxwZ5kLWHN6KZ4E';
@@ -120,13 +129,12 @@
       orientation:{heading:Cesium.Math.toRadians(0),pitch:Cesium.Math.toRadians(-90)}
     });
 
+    // Load tileset (do NOT block preloader)
     const tileset = await Cesium.Cesium3DTileset.fromIonAssetId(3591078);
     viewer.scene.primitives.add(tileset);
-
-    // Wait for both: tileset ready & preloader done
-    await Promise.all([tileset.readyPromise, prePromise]);
-    viewer.zoomTo(tileset);
-    preEl.classList.add('hide'); setTimeout(()=> preEl.remove(), 700);
+    tileset.readyPromise
+      .then(() => { viewer.zoomTo(tileset); viewer.scene.requestRender(); })
+      .catch((e) => console.error('Tileset failed to load:', e));
 
     // ===================== Helpers =====================
     const pickedInfo = document.getElementById('pickedInfo');
@@ -202,13 +210,13 @@
     const roomInput=document.getElementById('roomInput');
     document.getElementById('btnRoom').addEventListener('click', async ()=>{
       const name=(roomInput.value||'').trim(); if(!name) return; const pat=name.replace(/'/g,"\\'");
-      // Only rooms/spaces (IfcSpace/Space/Room)
+      // Only rooms/spaces (best-effort)
       const condMatch="(regexp('"+pat+"','i').test(${Name}) || regexp('"+pat+"','i').test(${LongName}) || regexp('"+pat+"','i').test(${Room})) && (regexp('IfcSpace','i').test(${IfcType}) || regexp('space|room','i').test(${class}))";
       const conditions=[[condMatch,"color('orange',1.0)"],["true","color('white',0.85)"]];
       try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
       const ok=await flyToMatch(f=>{
         const type=(f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||'').toString();
-        if(!(/IfcSpace/i.test(type) || /(\\b|^)(space|room)\\b/i.test(type))) return false;
+        if(!(/IfcSpace/i.test(type) || /(\b|^)(space|room)\b/i.test(type))) return false;
         const pnames=['Name','name','LongName','Room'];
         for(const k of pnames){ const v=f.getProperty(k); if(v && String(v).toLowerCase().includes(name.toLowerCase())) return true; }
         return false;
@@ -223,10 +231,10 @@
       const type=(f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||f.getProperty('Type')||'').toString();
       const name=(f.getProperty('Name')||f.getProperty('name')||f.getProperty('LongName')||'').toString();
       const storey=(f.getProperty('Storey')||f.getProperty('Level')||f.getProperty('BuildingStorey')||f.getProperty('Floor')||'').toString();
-      if(/IfcWindow/i.test(type) || /(\\b|^)window\\b/i.test(type)) counts.windows++;
-      if(/IfcDoor/i.test(type) || /(\\b|^)door\\b/i.test(type)) counts.doors++;
+      if(/IfcWindow/i.test(type) || /(\b|^)window\b/i.test(type)) counts.windows++;
+      if(/IfcDoor/i.test(type) || /(\b|^)door\b/i.test(type)) counts.doors++;
       if(storey){ storeys.set(storey,(storeys.get(storey)||0)+1); }
-      if(/IfcSpace/i.test(type) || /(\\b|^)(space|room)\\b/i.test(type)){ const key=storey||'(No Storey)'; if(!roomsByStorey.has(key)) roomsByStorey.set(key,new Set()); if(name) roomsByStorey.get(key).add(name); }
+      if(/IfcSpace/i.test(type) || /(\b|^)(space|room)\b/i.test(type)){ const key=storey||'(No Storey)'; if(!roomsByStorey.has(key)) roomsByStorey.set(key,new Set()); if(name) roomsByStorey.get(key).add(name); }
     }
     function processTile(tile){ const c=tile.content; const n=c?.featuresLength||0; for(let i=0;i<n;i++){ considerFeature(c.getFeature(i)); } }
     function refreshStatsBox(){ const levels=[...storeys.keys()].sort(); let lines=`Windows: ${counts.windows} | Doors: ${counts.doors}`; if(levels.length){ lines+=`\nStoreys (${levels.length}):`; for(const lv of levels){ lines+=`\n- ${lv}: ${storeys.get(lv)} elemen`; } } statsBox.textContent=lines; }
