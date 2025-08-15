@@ -192,6 +192,17 @@ viewer.scene.globe.enableLighting = true;
       ].filter(Boolean).join('\n');
 
       pickedInfo.textContent = out;
+      // Build attribute table view
+      const tbody = document.querySelector('#attrTable tbody');
+      if(tbody){
+        tbody.innerHTML='';
+        Object.keys(props).sort().forEach(k=>{
+          const tr=document.createElement('tr');
+          tr.innerHTML=`<td style="vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0">${k}</td>`+
+                       `<td style=\"vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0; word-break:break-all\">${String(props[k])}</td>`;
+          tbody.appendChild(tr);
+        });
+      }
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
     handler.setInputAction(() => clearHighlight(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
@@ -382,6 +393,22 @@ Storeys (${levels.length}):`;
       } catch(err){ pickedInfo.textContent = 'IFC parse error: '+err; }
       finally { ifcApi.CloseModel(modelID); }
     });
+  // Floor filter handler (safe style)
+    (function(){
+      const btn = document.getElementById('btnFloor');
+      if(!btn) return;
+      btn.addEventListener('click', ()=>{
+        const dd = document.getElementById('floorFilter');
+        const lv = (dd && dd.value ? dd.value.trim() : '');
+        if(!lv){ try{ tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions: [["true", "color('white', 0.85)"]] } }); }catch(_){}; return; }
+        const pat = lv.replace(/'/g, "\'");
+        const conditions = [
+          ["regexp('"+pat+"','i').test(\${Storey}) || regexp('"+pat+"','i').test(\${Level}) || regexp('"+pat+"','i').test(\${BuildingStorey}) || regexp('"+pat+"','i').test(\${Floor})", "color('yellow', 1.0)"],
+          ["true", "color('white', 0.2)"]
+        ];
+        try { tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); } catch(_){}
+      });
+    })();
   </script>
 </body>
 </html>
