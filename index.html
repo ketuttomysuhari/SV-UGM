@@ -144,32 +144,33 @@
     const pickedInfo = document.getElementById('pickedInfo');
     const statsBox = document.getElementById('stats');
 
-    // Selection via tileset.style using picked properties
+    // Escape regex special chars safely
     function escapeRe(s){
-      // Escape regex special chars safely
       return String(s).replace(/[.*+?^${}()|[\]\]/g, '\$&');
-    }()|[\]\]/g, '\$&'); }
+    }
+
+    // Build selection style from picked properties so highlight persists
     function selectByProps(props){
       const fieldToken = (k) => ({
-        'IfcGuid': '${IfcGuid}', 'IFC_GUID':'${IFC_GUID}', 'GlobalId':'${GlobalId}', 'globalId':'${globalId}',
+        'IfcGuid':'${IfcGuid}', 'IFC_GUID':'${IFC_GUID}', 'GlobalId':'${GlobalId}', 'globalId':'${globalId}',
         'elementId':'${elementId}', 'id':'${id}', 'ID':'${ID}', 'Name':'${Name}'
       })[k];
       const keysOrder = ['IfcGuid','IFC_GUID','GlobalId','globalId','elementId','id','ID'];
-      let tests = [];
-      for(const k of keysOrder){ if(props[k]){ const v = escapeRe(props[k]); const tok = fieldToken(k); if(tok){ tests.push("regexp('"+v+"','i').test("+tok+")"); break; } } }
-      if(tests.length===0 && props.Name){ const v = escapeRe(props.Name); tests.push("regexp('"+v+"','i').test("+fieldToken('Name')+")"); }
+      const tests = [];
+      for(const k of keysOrder){
+        if(props[k]){ const v = escapeRe(props[k]); const tok = fieldToken(k); if(tok){ tests.push("regexp('^"+v+"$','i').test("+tok+")"); break; }
+        }
+      }
+      if(tests.length===0 && props.Name){ const v = escapeRe(props.Name); tests.push("regexp('^"+v+"$','i').test("+fieldToken('Name')+")"); }
       if(!tests.length){ tileset.style = undefined; return; }
       const conditions = [ [ '('+tests.join(') || (')+')', "color('yellow', 1.0)" ], [ 'true', "color('white', 0.85)" ] ];
-      try{ tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); }catch(e){ console.warn('style error', e); }
-    }$','i').test(\${${k}})`); break; } }
-      if(tests.length===0 && props.Name){ const v = escapeRe(props.Name); tests.push(`regexp('^${v}$','i').test(\${Name})`); }
-      if(!tests.length){ tileset.style = undefined; return; }
-      const conditions = [ [ `(${tests.join(') || (')})`, "color('yellow', 1.0)" ], [ 'true', "color('white', 0.85)" ] ];
-      try{ tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); }catch(e){ console.warn('style error', e); }
+      try { tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); } catch(e) { console.warn('style error', e); }
     }
-    let lastColored=[]; 
+
+    let lastColored=[];
     function clearHighlight(){ for(const f of lastColored){ try{ f.color = Cesium.Color.WHITE; }catch{} } lastColored.length=0; }
     function highlightFeature(f){ try{ f.color = Cesium.Color.YELLOW; lastColored.push(f); }catch{} }
+
     async function flyToMatch(predicate,opt={}){
       const w=viewer.canvas.clientWidth,h=viewer.canvas.clientHeight,steps=7;
       for(let iy=1;iy<steps;iy++){
@@ -237,7 +238,6 @@ h:   ${h.toFixed(3)} m`;
           orientation:{ heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35) }, duration: 0.6
         });
       } else {
-        // fallback: pick under double-click
         const picked=viewer.scene.pick(click.position);
         if(picked){ const cart=viewer.scene.pickPosition(click.position); if(Cesium.defined(cart)){ const c=Cesium.Cartographic.fromCartesian(cart); viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromRadians(c.longitude,c.latitude, Math.max(8,c.height+15)), orientation:{ heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35) }, duration: 0.6 }); } }
       }
