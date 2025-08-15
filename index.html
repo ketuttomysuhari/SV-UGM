@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>IFC → Cesium | Preloader, GUID/Rooms, Floors</title>
+  <title>IFC → Cesium | Preloader, Picking & Stats</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
@@ -133,7 +133,7 @@
       orientation:{heading:Cesium.Math.toRadians(0),pitch:Cesium.Math.toRadians(-90)}
     });
 
-    // Load tileset (do NOT block preloader)
+    // Load tileset (non-blocking)
     const tileset = await Cesium.Cesium3DTileset.fromIonAssetId(3591078);
     viewer.scene.primitives.add(tileset);
     tileset.readyPromise
@@ -144,30 +144,7 @@
     const pickedInfo = document.getElementById('pickedInfo');
     const statsBox = document.getElementById('stats');
 
-    // Escape regex special chars safely
-    function escapeRe(s){
-      // Escape regex special chars safely
-      // ex: "a.b" -> "a\.b"
-      return String(s).replace(/[.*+?^${}()|[\]\]/g, '\$&');
-    }
-
-    // Build selection style from picked properties so highlight persists
-    function selectByProps(props){
-      const fieldToken = (k) => ({
-        'IfcGuid':'${IfcGuid}', 'IFC_GUID':'${IFC_GUID}', 'GlobalId':'${GlobalId}', 'globalId':'${globalId}',
-        'elementId':'${elementId}', 'id':'${id}', 'ID':'${ID}', 'Name':'${Name}'
-      })[k];
-      const keysOrder = ['IfcGuid','IFC_GUID','GlobalId','globalId','elementId','id','ID'];
-      const tests = [];
-      for(const k of keysOrder){
-        if(props[k]){ const v = escapeRe(props[k]); const tok = fieldToken(k); if(tok){ tests.push("regexp('^"+v+"$','i').test("+tok+")"); break; }
-        }
-      }
-      if(tests.length===0 && props.Name){ const v = escapeRe(props.Name); tests.push("regexp('^"+v+"$','i').test("+fieldToken('Name')+")"); }
-      if(!tests.length){ tileset.style = undefined; return; }
-      const conditions = [ [ '('+tests.join(') || (')+')', "color('yellow', 1.0)" ], [ 'true', "color('white', 0.85)" ] ];
-      try { tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); } catch(e) { console.warn('style error', e); }
-    }
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
 
     let lastColored=[];
     function clearHighlight(){ for(const f of lastColored){ try{ f.color = Cesium.Color.WHITE; }catch{} } lastColored.length=0; }
@@ -199,12 +176,25 @@
       return false;
     }
 
+    // Limit interaction to a single building name (best-effort)
+    const buildingMask = /Gedung Pantja Dharma/i;
+    function inTargetBuilding(props){
+      for(const k of Object.keys(props)){
+        const v = props[k];
+        if(v && String(v).match(buildingMask)) return true;
+      }
+      return false;
+    }
+
     // ===================== Picking =====================
     const handler=new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
     let lastPickCarto = null;
     handler.setInputAction((click)=>{
-      const picked=viewer.scene.pick(click.position);
-      if(!picked||typeof picked.getProperty!=='function') return;
+      // Try to find a picked feature that belongs to the target building
+      const picks = viewer.scene.drillPick(click.position);
+      let picked = null;
+      for(const p of picks){ if(typeof p.getProperty==='function'){ picked = p; break; } }
+      if(!picked) return;
       clearHighlight(); highlightFeature(picked);
 
       const cart=viewer.scene.pickPosition(click.position);
@@ -212,24 +202,39 @@
       if(Cesium.defined(cart)){
         const carto=Cesium.Cartographic.fromCartesian(cart); lastPickCarto = carto;
         const lon=Cesium.Math.toDegrees(carto.longitude), lat=Cesium.Math.toDegrees(carto.latitude), h=carto.height;
-        coordText=`lon: ${lon.toFixed(7)}
-lat: ${lat.toFixed(7)}
-h:   ${h.toFixed(3)} m`;
-        viewer.camera.flyTo({destination:Cesium.Cartesian3.fromRadians(carto.longitude,carto.latitude,Math.max(8,h+20)),orientation:{heading:viewer.camera.heading,pitch:Cesium.Math.toRadians(-35)},duration:0.9});
+        coordText=`lon: ${lon.toFixed(7)}\nlat: ${lat.toFixed(7)}\nh:   ${h.toFixed(3)} m`;
       }
 
-      const props={};
-      const pids=(picked.getPropertyIds&&picked.getPropertyIds())||[];
-      for(const id of pids){ try{ props[id]=picked.getProperty(id); }catch{} }
-      selectByProps(props);
+      // Gather properties for the top-most candidate first
+      let props={}; const pids=(picked.getPropertyIds&&picked.getPropertyIds())||[]; for(const id of pids){ try{ props[id]=picked.getProperty(id); }catch{} }
+      // If not in the target building, search other picks under cursor
+      if(!inTargetBuilding(props)){
+        for(const p of picks){ if(typeof p.getProperty!=='function') continue; const ids=(p.getPropertyIds&&p.getPropertyIds())||[]; const tmp={}; for(const id of ids){ try{ tmp[id]=p.getProperty(id);}catch{} } if(inTargetBuilding(tmp)){ picked=p; props=tmp; clearHighlight(); highlightFeature(picked); break; } }
+      }
+      // If still not matched, just return quietly
+      if(!inTargetBuilding(props)) return;
+
       const ifcGuid=props.IfcGuid||props.IFC_GUID||props.GlobalId||props.globalId||props.elementId;
       const ifcType=props.IfcType||props.ifcClass||props.class||props.Type||props.Category;
-      const out = [`# BIM feature`, ifcGuid?`IfcGUID: ${ifcGuid}`:null, ifcType?`Type:    ${ifcType}`:null, `
-# All properties`, JSON.stringify(props,null,2), `
-# Pick position (WGS84)`, coordText].filter(Boolean).join('
-');
+      const out = [
+        `# BIM feature`,
+        ifcGuid?`IfcGUID: ${ifcGuid}`:null,
+        ifcType?`Type:    ${ifcType}`:null,
+        `\n# All properties`,
+        JSON.stringify(props,null,2),
+        `\n# Pick position (WGS84)`,
+        coordText
+      ].filter(Boolean).join('\n');
       pickedInfo.textContent = out;
-      const tbody=document.querySelector('#attrTable tbody'); if(tbody){ tbody.innerHTML=''; Object.keys(props).sort().forEach(k=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td style="vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0">${k}</td><td style=\"vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0; word-break:break-all\">${String(props[k])}</td>`; tbody.appendChild(tr); }); }
+      const tbody=document.querySelector('#attrTable tbody');
+      if(tbody){
+        tbody.innerHTML='';
+        Object.keys(props).sort().forEach(k=>{
+          const tr=document.createElement('tr');
+          tr.innerHTML=`<td style="vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0">${escapeHtml(k)}</td><td style="vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0; word-break:break-all">${escapeHtml(String(props[k]))}</td>`;
+          tbody.appendChild(tr);
+        });
+      }
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
     // Double-click to zoom to last picked element
@@ -311,6 +316,16 @@ h:   ${h.toFixed(3)} m`;
       const pat=lv.replace(/'/g,"\\'"); const conditions=[["regexp('"+pat+"','i').test(${Storey}) || regexp('"+pat+"','i').test(${Level}) || regexp('"+pat+"','i').test(${BuildingStorey}) || regexp('"+pat+"','i').test(${Floor})","color('yellow',1.0)"],["true","color('white',0.2)"]];
       try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
     });
+
+    // ===================== Self-tests =====================
+    (function(){
+      try{
+        console.assert(!!Cesium, 'Cesium should be loaded');
+        console.assert(!!viewer && !!viewer.scene, 'Viewer should be created');
+        console.assert(typeof Cesium.Cesium3DTileset.fromIonAssetId==='function', 'fromIonAssetId available');
+        console.log('[SELF-TEST] Basic environment OK');
+      }catch(e){ console.error('[SELF-TEST] Failed:', e); }
+    })();
   </script>
 </body>
 </html>
