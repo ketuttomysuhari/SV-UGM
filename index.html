@@ -52,6 +52,10 @@
       <pre id="stats" class="pre">Windows: 0 | Doors: 0 | Storeys: -
 (Lanjutkan dengan tombol "Scan Stats")</pre>
     </div>
+    <div class="card">
+      <div style="font-weight:600; margin-bottom:6px;">Floors & Rooms</div>
+      <div id="levelsPanel" class="pre">(Tekan "Scan Stats" untuk menampilkan daftar lantai & ruang)</div>
+    </div>
   </div>
 
   <div class="logo"><img src="https://sv.ugm.ac.id/wp-content/uploads/sites/27/2021/09/Lambang-UGM-putih.png" alt="logo"/></div>
@@ -74,14 +78,8 @@
     viewer.scene.shadowMap.enabled = true;
     viewer.shadows = true;
     viewer.scene.highDynamicRange = true;
-    try {
-      // Darken model colors a bit using style mix (if supported)
-      // This avoids the over-bright look from PBR baseColor only
-      // If not supported, it will be ignored by catch
-      const darkStyle = new Cesium.Cesium3DTileStyle({ color: "mix(${COLOR}, color('black'), 0.15)" });
-      // We'll apply this after tileset is loaded (below)
-      window.__darkStyle = darkStyle;
-    } catch(e) {}
+    // Enable globe lighting for a less-flat look (safer than style mix)
+viewer.scene.globe.enableLighting = true;
 
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(110.37394, -7.77463, 400),
@@ -93,7 +91,7 @@
     await tileset.readyPromise;
     viewer.zoomTo(tileset);
 
-    if(window.__darkStyle){ try{ tileset.style = window.__darkStyle; }catch(e){} }
+    // Keep default style; avoid risky color mixing that can crash on undefined COLORcatch(e){} }
 
     // ─────────────────────────────────────────────────────────────────────
     // Helpers
@@ -204,11 +202,20 @@
     const guidInput = document.getElementById('guidInput');
     document.getElementById('btnGuid').addEventListener('click', async () => {
       const guid = (guidInput.value || '').trim();
-      if(!guid){ tileset.style = window.__darkStyle || undefined; return; }
-      const fields = ["\\${IfcGuid}", "\\${GlobalId}", "\\${IFC_GUID}", "\\${elementId}"];
-      const showExpr = fields.map(f => `(${f} == '${guid}')`).join(' || ');
-      const colorExpr = `(${showExpr}) ? color('yellow', 1.0) : mix(${COLOR}, color('black'), 0.15)`;
-      tileset.style = new Cesium.Cesium3DTileStyle({ color: colorExpr });
+      if(!guid){ tileset.style = undefined; return; }
+      const pat = guid.replace(/'/g, "\'");
+      const conditions = [
+        ["regexp('"+pat+"','i').test(\${IfcGuid}) || regexp('"+pat+"','i').test(\${GlobalId}) || regexp('"+pat+"','i').test(\${IFC_GUID}) || regexp('"+pat+"','i').test(\${elementId})", "color('yellow', 1.0)"],
+        ['true', "color('white', 0.85)"]
+      ];
+      try { tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); } catch(_) { tileset.style = undefined; }
+
+      const ok = await flyToMatch(f => {
+        const val = f.getProperty('IfcGuid') || f.getProperty('GlobalId') || f.getProperty('IFC_GUID') || f.getProperty('elementId');
+        return val && String(val).toLowerCase().includes(guid.toLowerCase());
+      }, { duration: 0.9 });
+      if(!ok){ viewer.flyTo(tileset, { duration: 0.8 }); }
+    });
 
       const ok = await flyToMatch(f => {
         const val = f.getProperty('IfcGuid') || f.getProperty('GlobalId') || f.getProperty('IFC_GUID') || f.getProperty('elementId');
@@ -223,10 +230,20 @@
     const roomInput = document.getElementById('roomInput');
     document.getElementById('btnRoom').addEventListener('click', async () => {
       const name = (roomInput.value || '').trim(); if(!name) return;
-      const fields = ["\\${Name}", "\\${name}", "\\${LongName}", "\\${Room}"];
-      const showExpr = fields.map(f => `(${f} == '${name}')`).join(' || ');
-      const colorExpr = `(${showExpr}) ? color('orange', 1.0) : mix(${COLOR}, color('black'), 0.15)`;
-      try { tileset.style = new Cesium.Cesium3DTileStyle({ color: colorExpr }); } catch(_){}
+      const pat = name.replace(/'/g, "\'");
+      const conditions = [
+        ["regexp('"+pat+"','i').test(\${Name}) || regexp('"+pat+"','i').test(\${LongName}) || regexp('"+pat+"','i').test(\${Room})", "color('orange', 1.0)"],
+        ['true', "color('white', 0.85)"]
+      ];
+      try { tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); } catch(_){}
+
+      const ok = await flyToMatch(f => {
+        const pnames = ['Name','name','LongName','Room'];
+        for(const k of pnames){ const v = f.getProperty(k); if(v && String(v).toLowerCase().includes(name.toLowerCase())) return true; }
+        return false;
+      }, { duration: 0.9 });
+      if(!ok){ viewer.flyTo(tileset, { duration: 0.8 }); }
+    }); } catch(_){}
 
       const ok = await flyToMatch(f => {
         const pnames = ['Name','name','LongName','Room'];
@@ -242,30 +259,76 @@
     const seen = new Set();
     const counts = { windows:0, doors:0 };
     const storeys = new Map(); // name -> count
+    const roomsByStorey = new Map(); // storey -> Set(names)
 
     function considerFeature(f){
       const guid = f.getProperty('IfcGuid') || f.getProperty('GlobalId') || f.getProperty('elementId');
-      if(!guid || seen.has(guid)) return;
-      seen.add(guid);
+      if(guid && seen.has(guid)) return; if(guid) seen.add(guid);
       const type = (f.getProperty('IfcType') || f.getProperty('ifcClass') || f.getProperty('class') || f.getProperty('Type') || '').toString();
-      const name = (f.getProperty('Name') || f.getProperty('name') || '').toString();
-      const storey = (f.getProperty('Storey') || f.getProperty('Level') || f.getProperty('BuildingStorey') || '').toString();
+      const name = (f.getProperty('Name') || f.getProperty('name') || f.getProperty('LongName') || '').toString();
+      const storey = (f.getProperty('Storey') || f.getProperty('Level') || f.getProperty('BuildingStorey') || f.getProperty('Floor') || '').toString();
 
-      if(/IfcWindow/i.test(type)) counts.windows++;
-      if(/IfcDoor/i.test(type)) counts.doors++;
+      if(/IfcWindow/i.test(type) || /(^|)window/i.test(type)) counts.windows++;
+      if(/IfcDoor/i.test(type) || /(^|)door/i.test(type)) counts.doors++;
 
       if(storey){ storeys.set(storey, (storeys.get(storey)||0) + 1); }
-      // Fallback: often room/space names carry level like "L1-..."; optional parsing could go here
+
+      // Guess rooms: IfcSpace/Space/Room
+      if(/IfcSpace/i.test(type) || /(^|)(space|room)/i.test(type)){
+        const key = storey || '(No Storey)';
+        if(!roomsByStorey.has(key)) roomsByStorey.set(key, new Set());
+        if(name) roomsByStorey.get(key).add(name);
+      }
     }
 
     function processTile(tile){
-      const c = tile.content; const n = c.featuresLength || 0;
+      const c = tile.content; const n = c?.featuresLength || 0;
       for(let i=0;i<n;i++){ const f=c.getFeature(i); considerFeature(f); }
     }
 
     function refreshStatsBox(){
       const levels = [...storeys.keys()].sort();
       let lines = `Windows: ${counts.windows} | Doors: ${counts.doors}`;
+      if(levels.length){
+        lines += `
+Storeys (${levels.length}):`;
+        for(const lv of levels){ lines += `
+- ${lv}: ${storeys.get(lv)} elemen`; }
+      }
+      statsBox.textContent = lines;
+    }
+
+    function renderLevelsPanel(){
+      const el = document.getElementById('levelsPanel');
+      if(!roomsByStorey.size){ el.textContent = '(Tidak ada data ruang terdeteksi)'; return; }
+      let html = '';
+      for(const [level, rooms] of roomsByStorey){
+        html += `<div style="margin:6px 0; font-weight:600;">${level}</div>`;
+        const arr = Array.from(rooms).sort();
+        html += `<div style="display:flex; flex-wrap:wrap; gap:4px;">`+
+          arr.map(r=>`<button class="room-btn" data-room="${r.replace(/"/g,'&quot;')}">${r}</button>`).join('')+
+          `</div>`;
+      }
+      el.innerHTML = html;
+      el.querySelectorAll('.room-btn').forEach(btn=>{
+        btn.addEventListener('click', async ()=>{
+          const name = btn.getAttribute('data-room');
+          roomInput.value = name;
+          const pat = name.replace(/'/g, "\'");
+          const conditions = [
+            ["regexp('"+pat+"','i').test(\${Name}) || regexp('"+pat+"','i').test(\${LongName}) || regexp('"+pat+"','i').test(\${Room})", "color('orange', 1.0)"],
+            ['true', "color('white', 0.85)"]
+          ];
+          try { tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); } catch(_){ }
+          const ok = await flyToMatch(f => {
+            const pnames = ['Name','name','LongName','Room'];
+            for(const k of pnames){ const v = f.getProperty(k); if(v && String(v).toLowerCase() === name.toLowerCase()) return true; }
+            return false;
+          }, { duration: 0.9 });
+          if(!ok){ viewer.flyTo(tileset, { duration: 0.8 }); }
+        });
+      });
+    } | Doors: ${counts.doors}`;
       if(levels.length){
         lines += `\nStoreys (${levels.length}):`;
         for(const lv of levels){ lines += `\n- ${lv}: ${storeys.get(lv)} elemen`; }
@@ -274,8 +337,13 @@
     }
 
     document.getElementById('btnScan').addEventListener('click', () => {
-      // Reset and rescan currently loaded/visible tiles
-      seen.clear(); counts.windows=0; counts.doors=0; storeys.clear();
+      seen.clear(); counts.windows=0; counts.doors=0; storeys.clear(); roomsByStorey.clear();
+      viewer.scene.frameState.commandList; // hint a render
+      tileset._selectedTiles && tileset._selectedTiles.forEach(t=>processTile(t));
+      tileset.tileVisible.addEventListener(processTile);
+      refreshStatsBox();
+      renderLevelsPanel();
+    }); counts.windows=0; counts.doors=0; storeys.clear();
       // Scan visible
       viewer.scene.frameState.commandList; // hint a render
       tileset._selectedTiles && tileset._selectedTiles.forEach(t=>processTile(t));
@@ -287,8 +355,8 @@
     // ─────────────────────────────────────────────────────────────────────
     // OPTIONAL: IFC georeferencing reader (IfcMapConversion/IfcSite)
     // ─────────────────────────────────────────────────────────────────────
-    import { IfcAPI, IFCMAPCONVERSION, IFCSITE } from 'https://unpkg.com/web-ifc@0.0.46/web-ifc-api.js';
-    const ifcApi = new IfcAPI(); await ifcApi.Init(); ifcApi.SetWasmPath('https://unpkg.com/web-ifc@0.0.46/');
+    import { IfcAPI, IFCMAPCONVERSION, IFCSITE } from 'https://cdn.jsdelivr.net/npm/web-ifc@0.0.46/web-ifc-api.js';
+    const ifcApi = new IfcAPI(); await ifcApi.Init(); ifcApi.SetWasmPath('https://cdn.jsdelivr.net/npm/web-ifc@0.0.46/');
 
     document.getElementById('ifcFile').addEventListener('change', async (e) => {
       const file = e.target.files?.[0]; if(!file) return;
