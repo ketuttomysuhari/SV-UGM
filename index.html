@@ -2,43 +2,66 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>IFC → Cesium | Pick, Zoom to GUID, IFC Georeferencing</title>
+  <title>IFC → Cesium | GUID zoom, IFC coords, Stats, Rooms</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
   <style>
     html, body, #cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; }
-    .ui { position:absolute; top:10px; left:10px; z-index:1000; display:flex; gap:8px; align-items:center; }
+    /* UI blocks */
+    .ui-left { position:absolute; top:10px; left:10px; z-index:1000; display:flex; gap:8px; align-items:center; }
+    .ui-right { position:absolute; top:66px; right:10px; z-index:1000; display:flex; flex-direction:column; gap:8px; }
     .card { background:#ffffffd9; backdrop-filter: blur(6px); border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; box-shadow:0 4px 14px rgba(0,0,0,.08); }
-    .row { display:flex; gap:6px; align-items:center; }
-    .row input, .row button, .row label { font: 13px/1.3 system-ui, sans-serif; }
-    .row input[type="text"] { padding:6px 8px; border:1px solid #d1d5db; border-radius:8px; min-width:280px; }
+    .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+    .row input, .row button, .row label { font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .row input[type="text"] { padding:6px 8px; border:1px solid #d1d5db; border-radius:8px; min-width:220px; }
     .row button { padding:6px 10px; border:1px solid #d1d5db; background:white; border-radius:8px; cursor:pointer; }
     .row button:hover { background:#f3f4f6; }
-    .info { position:absolute; bottom:12px; left:12px; z-index:1000; max-width:420px; }
-    .info pre { margin:0; font: 12px/1.35 ui-monospace, monospace; white-space:pre-wrap; }
     .badge { display:inline-block; font-size:11px; padding:2px 6px; border-radius:999px; background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; margin-right:6px; }
+    .pre { margin:0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; white-space:pre-wrap; }
     .logo { position:absolute; bottom:16px; right:16px; z-index:1000; opacity:0.9; }
     .logo img { width:140px; }
   </style>
 </head>
 <body>
   <div id="cesiumContainer"></div>
-  <div class="ui card">
+
+  <!-- LEFT: Search & Actions -->
+  <div class="ui-left card">
     <div class="row">
-      <span class="badge">Query</span>
-      <input id="guidInput" type="text" placeholder="Enter IfcGUID" />
-      <button id="applyGuid">Apply</button>
+      <span class="badge">GUID</span>
+      <input id="guidInput" type="text" placeholder="IfcGUID" />
+      <button id="btnGuid">Highlight & Fly</button>
+      <span class="badge">Room</span>
+      <input id="roomInput" type="text" placeholder="Exact Name (e.g., MUSHOLA)" />
+      <button id="btnRoom">Find Room</button>
+      <label class="badge" for="ifcFile">IFC Geo</label>
+      <input id="ifcFile" type="file" accept=".ifc" />
+      <button id="btnScan">Scan Stats</button>
     </div>
   </div>
-  <div class="info card">
-    <div style="font-weight:600; margin-bottom:6px;">Picked feature</div>
-    <pre id="pickedInfo">Click an element...</pre>
+
+  <!-- RIGHT: Info & Stats (under geocoder at top-right) -->
+  <div class="ui-right">
+    <div class="card">
+      <div style="font-weight:600; margin-bottom:6px;">Picked feature</div>
+      <pre id="pickedInfo" class="pre">Click an element…</pre>
+    </div>
+    <div class="card">
+      <div style="font-weight:600; margin-bottom:6px;">Model stats</div>
+      <pre id="stats" class="pre">Windows: 0 | Doors: 0 | Storeys: -
+(Lanjutkan dengan tombol "Scan Stats")</pre>
+    </div>
   </div>
+
   <div class="logo"><img src="https://sv.ugm.ac.id/wp-content/uploads/sites/27/2021/09/Lambang-UGM-putih.png" alt="logo"/></div>
 
   <script type="module">
+    // ─────────────────────────────────────────────────────────────────────
+    // Init Cesium
+    // ─────────────────────────────────────────────────────────────────────
     Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJiNDJhNGIzMy1lYjk1LTQ5MTgtOGIxMy1iMjNkYWFjZTZjZGMiLCJpZCI6MzA1NDUzLCJpYXQiOjE3NDk4ODQ0NjF9.ZzfqWk4Sc_3zrTXoyumAzAVH4QavWxwZ5kLWHN6KZ4E';
+
     const viewer = new Cesium.Viewer('cesiumContainer', {
       terrain: Cesium.Terrain.fromWorldTerrain(),
       animation:false, timeline:false, homeButton:false,
@@ -46,6 +69,20 @@
       navigationHelpButton:false, fullscreenButton:true,
       selectionIndicator:false, infoBox:false
     });
+
+    // Slightly more realistic & less bright appearance
+    viewer.scene.shadowMap.enabled = true;
+    viewer.shadows = true;
+    viewer.scene.highDynamicRange = true;
+    try {
+      // Darken model colors a bit using style mix (if supported)
+      // This avoids the over-bright look from PBR baseColor only
+      // If not supported, it will be ignored by catch
+      const darkStyle = new Cesium.Cesium3DTileStyle({ color: "mix(${COLOR}, color('black'), 0.15)" });
+      // We'll apply this after tileset is loaded (below)
+      window.__darkStyle = darkStyle;
+    } catch(e) {}
+
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(110.37394, -7.77463, 400),
       orientation: { heading: Cesium.Math.toRadians(0.0), pitch: Cesium.Math.toRadians(-90.0) }
@@ -54,46 +91,228 @@
     const tileset = await Cesium.Cesium3DTileset.fromIonAssetId(3591078);
     viewer.scene.primitives.add(tileset);
     await tileset.readyPromise;
+    viewer.zoomTo(tileset);
+
+    if(window.__darkStyle){ try{ tileset.style = window.__darkStyle; }catch(e){} }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────────────
+    const pickedInfo = document.getElementById('pickedInfo');
+    const statsBox = document.getElementById('stats');
 
     let lastColored = [];
-    function clearHighlight(){ lastColored.forEach(f=>f.color=Cesium.Color.WHITE); lastColored=[]; }
-    function highlightFeature(feature){ feature.color=Cesium.Color.YELLOW; lastColored.push(feature); }
+    function clearHighlight(){ for(const f of lastColored){ try{ f.color = Cesium.Color.WHITE; }catch(_){} } lastColored.length=0; }
+    function highlightFeature(f){ try{ f.color = Cesium.Color.YELLOW; lastColored.push(f); }catch(_){} }
 
+    // Screen grid scan to fly to a feature that satisfies predicate(feature)
+    async function flyToMatch(predicate, options={}){
+      const w = viewer.canvas.clientWidth, h = viewer.canvas.clientHeight;
+      const steps = 7;
+      for(let iy=1; iy<steps; iy++){
+        for(let ix=1; ix<steps; ix++){
+          const pt = new Cesium.Cartesian2(Math.round((ix/steps)*w), Math.round((iy/steps)*h));
+          const picked = viewer.scene.drillPick(pt);
+          for(const p of picked){
+            if(typeof p.getProperty !== 'function') continue;
+            try { if(predicate(p)){
+              const cart = viewer.scene.pickPosition(pt);
+              if(Cesium.defined(cart)){
+                const carto = Cesium.Cartographic.fromCartesian(cart);
+                const H = carto.height;
+                viewer.camera.flyTo({
+                  destination: Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, Math.max(8.0, H+18.0)),
+                  orientation: { heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35), roll: 0 },
+                  duration: options.duration ?? 1.0
+                });
+                return true;
+              }
+            }} catch(_){}
+          }
+        }
+      }
+      return false;
+    }
+
+    // IFC MapConversion storage for projected coords
+    const IFCGeo = { has:false, Eastings:0, Northings:0, OrthogonalHeight:0, Scale:1, XAxisAbscissa:1, XAxisOrdinate:0 };
+    function projectLocalToMap(xLocal, yLocal){
+      const Xp = xLocal*IFCGeo.XAxisAbscissa + yLocal*IFCGeo.XAxisOrdinate;
+      const Yp = xLocal*(-IFCGeo.XAxisOrdinate) + yLocal*IFCGeo.XAxisAbscissa;
+      return { Xmap: IFCGeo.Eastings + IFCGeo.Scale*Xp, Ymap: IFCGeo.Northings + IFCGeo.Scale*Yp };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Picking
+    // ─────────────────────────────────────────────────────────────────────
     const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
     handler.setInputAction((click) => {
       const picked = viewer.scene.pick(click.position);
-      if(!picked || !picked.getProperty) return;
-      clearHighlight(); highlightFeature(picked);
+      if(!picked || typeof picked.getProperty !== 'function') return;
+      clearHighlight();
+      highlightFeature(picked);
+
       const cart = viewer.scene.pickPosition(click.position);
       let coordText = 'n/a';
+      let mapText = '';
       if(Cesium.defined(cart)){
         const carto = Cesium.Cartographic.fromCartesian(cart);
-        coordText = `lon:${Cesium.Math.toDegrees(carto.longitude).toFixed(7)}\nlat:${Cesium.Math.toDegrees(carto.latitude).toFixed(7)}\nh:${carto.height.toFixed(3)} m`;
+        const lon = Cesium.Math.toDegrees(carto.longitude);
+        const lat = Cesium.Math.toDegrees(carto.latitude);
+        const h   = carto.height;
+        coordText = `lon: ${lon.toFixed(7)}\nlat: ${lat.toFixed(7)}\nh:   ${h.toFixed(3)} m`;
+
+        if(IFCGeo.has){
+          const modelMatrix = tileset.root.computedTransform || tileset.root.transform;
+          const inv = Cesium.Matrix4.inverse(modelMatrix, new Cesium.Matrix4());
+          const local = Cesium.Matrix4.multiplyByPoint(inv, cart, new Cesium.Cartesian3());
+          const XY = projectLocalToMap(local.x, local.y);
+          mapText = `\nX_map: ${XY.Xmap.toFixed(3)}\nY_map: ${XY.Ymap.toFixed(3)}`;
+        }
+
         viewer.camera.flyTo({
-          destination: Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, Math.max(8, carto.height+20)),
-          orientation:{ heading:viewer.camera.heading, pitch:Cesium.Math.toRadians(-35)}, duration:0.9
+          destination: Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, Math.max(8.0, h + 20.0)),
+          orientation: { heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35), roll: 0 },
+          duration: 0.9
         });
       }
-      const props = {}; (picked.getPropertyIds()||[]).forEach(id=>props[id]=picked.getProperty(id));
-      document.getElementById('pickedInfo').textContent = JSON.stringify(props,null,2)+`\n${coordText}`;
+
+      const ids = (picked.getPropertyIds && picked.getPropertyIds()) || [];
+      const props = {}; for(const id of ids){ props[id] = picked.getProperty(id); }
+      const ifcGuid = props.IfcGuid || props.IFC_GUID || props.GlobalId || props.globalId || props.elementId;
+      const ifcType = props.IfcType || props.ifcClass || props.class || props.Type || props.Category;
+
+      const out = [
+        `# BIM feature`,
+        ifcGuid ? `IfcGUID: ${ifcGuid}` : null,
+        ifcType ? `Type:    ${ifcType}` : null,
+        `\n# All properties`,
+        JSON.stringify(props, null, 2),
+        `\n# Pick position (WGS84)`,
+        coordText,
+        IFCGeo.has ? `\n# IFC MapConversion (projected)\n${mapText}` : null
+      ].filter(Boolean).join('\n');
+
+      pickedInfo.textContent = out;
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-    document.getElementById('applyGuid').addEventListener('click',()=>{
-      const guid = document.getElementById('guidInput').value.trim();
-      if(!guid){ tileset.style=undefined; return; }
-      const style = new Cesium.Cesium3DTileStyle({ color: `(${["${IfcGuid}","${GlobalId}","${IFC_GUID}","${elementId}"].map(f=>`(${f}=='${guid}')`).join(' || ')}) ? color('yellow') : color('white')` });
-      tileset.style=style;
-      const positions=[];
-      tileset.tileVisible.addEventListener(tile=>{
-        tile.content.featuresLength && [...Array(tile.content.featuresLength).keys()].forEach(i=>{
-          const f=tile.content.getFeature(i);
-          if([f.getProperty('IfcGuid'),f.getProperty('GlobalId'),f.getProperty('IFC_GUID'),f.getProperty('elementId')].includes(guid)){
-            const center=Cesium.BoundingSphere.fromPoints([f.boundingVolume.boundingVolume.center]);
-            positions.push(center);
-          }
-        });
-      });
-      if(positions.length){ viewer.camera.flyToBoundingSphere(Cesium.BoundingSphere.fromPoints(positions),{duration:1.5}); }
+    handler.setInputAction(() => clearHighlight(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+
+    // ─────────────────────────────────────────────────────────────────────
+    // GUID filter + auto-zoom (fix: escape ${} in style string with \$)
+    // ─────────────────────────────────────────────────────────────────────
+    const guidInput = document.getElementById('guidInput');
+    document.getElementById('btnGuid').addEventListener('click', async () => {
+      const guid = (guidInput.value || '').trim();
+      if(!guid){ tileset.style = window.__darkStyle || undefined; return; }
+      const fields = ["\\${IfcGuid}", "\\${GlobalId}", "\\${IFC_GUID}", "\\${elementId}"];
+      const showExpr = fields.map(f => `(${f} == '${guid}')`).join(' || ');
+      const colorExpr = `(${showExpr}) ? color('yellow', 1.0) : mix(${COLOR}, color('black'), 0.15)`;
+      tileset.style = new Cesium.Cesium3DTileStyle({ color: colorExpr });
+
+      const ok = await flyToMatch(f => {
+        const val = f.getProperty('IfcGuid') || f.getProperty('GlobalId') || f.getProperty('IFC_GUID') || f.getProperty('elementId');
+        return val && String(val).trim() === guid;
+      }, { duration: 0.9 });
+      if(!ok){ viewer.flyTo(tileset, { duration: 0.8 }); }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Find room by exact Name (e.g., "MUSHOLA") and fly to it
+    // ─────────────────────────────────────────────────────────────────────
+    const roomInput = document.getElementById('roomInput');
+    document.getElementById('btnRoom').addEventListener('click', async () => {
+      const name = (roomInput.value || '').trim(); if(!name) return;
+      const fields = ["\\${Name}", "\\${name}", "\\${LongName}", "\\${Room}"];
+      const showExpr = fields.map(f => `(${f} == '${name}')`).join(' || ');
+      const colorExpr = `(${showExpr}) ? color('orange', 1.0) : mix(${COLOR}, color('black'), 0.15)`;
+      try { tileset.style = new Cesium.Cesium3DTileStyle({ color: colorExpr }); } catch(_){}
+
+      const ok = await flyToMatch(f => {
+        const pnames = ['Name','name','LongName','Room'];
+        for(const k of pnames){ const v = f.getProperty(k); if(v && String(v).trim() === name) return true; }
+        return false;
+      }, { duration: 0.9 });
+      if(!ok){ viewer.flyTo(tileset, { duration: 0.8 }); }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Stats scan: count Doors/Windows & storey listing (best-effort from props)
+    // ─────────────────────────────────────────────────────────────────────
+    const seen = new Set();
+    const counts = { windows:0, doors:0 };
+    const storeys = new Map(); // name -> count
+
+    function considerFeature(f){
+      const guid = f.getProperty('IfcGuid') || f.getProperty('GlobalId') || f.getProperty('elementId');
+      if(!guid || seen.has(guid)) return;
+      seen.add(guid);
+      const type = (f.getProperty('IfcType') || f.getProperty('ifcClass') || f.getProperty('class') || f.getProperty('Type') || '').toString();
+      const name = (f.getProperty('Name') || f.getProperty('name') || '').toString();
+      const storey = (f.getProperty('Storey') || f.getProperty('Level') || f.getProperty('BuildingStorey') || '').toString();
+
+      if(/IfcWindow/i.test(type)) counts.windows++;
+      if(/IfcDoor/i.test(type)) counts.doors++;
+
+      if(storey){ storeys.set(storey, (storeys.get(storey)||0) + 1); }
+      // Fallback: often room/space names carry level like "L1-..."; optional parsing could go here
+    }
+
+    function processTile(tile){
+      const c = tile.content; const n = c.featuresLength || 0;
+      for(let i=0;i<n;i++){ const f=c.getFeature(i); considerFeature(f); }
+    }
+
+    function refreshStatsBox(){
+      const levels = [...storeys.keys()].sort();
+      let lines = `Windows: ${counts.windows} | Doors: ${counts.doors}`;
+      if(levels.length){
+        lines += `\nStoreys (${levels.length}):`;
+        for(const lv of levels){ lines += `\n- ${lv}: ${storeys.get(lv)} elemen`; }
+      }
+      statsBox.textContent = lines;
+    }
+
+    document.getElementById('btnScan').addEventListener('click', () => {
+      // Reset and rescan currently loaded/visible tiles
+      seen.clear(); counts.windows=0; counts.doors=0; storeys.clear();
+      // Scan visible
+      viewer.scene.frameState.commandList; // hint a render
+      tileset._selectedTiles && tileset._selectedTiles.forEach(t=>processTile(t));
+      // Also attempt to scan when tiles become visible as you navigate
+      tileset.tileVisible.addEventListener(processTile);
+      refreshStatsBox();
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // OPTIONAL: IFC georeferencing reader (IfcMapConversion/IfcSite)
+    // ─────────────────────────────────────────────────────────────────────
+    import { IfcAPI, IFCMAPCONVERSION, IFCSITE } from 'https://unpkg.com/web-ifc@0.0.46/web-ifc-api.js';
+    const ifcApi = new IfcAPI(); await ifcApi.Init(); ifcApi.SetWasmPath('https://unpkg.com/web-ifc@0.0.46/');
+
+    document.getElementById('ifcFile').addEventListener('change', async (e) => {
+      const file = e.target.files?.[0]; if(!file) return;
+      const buf = await file.arrayBuffer();
+      const modelID = ifcApi.OpenModel(buf);
+      try {
+        let text = '# IFC Georeferencing\n';
+        const ids = ifcApi.GetLineIDsWithType(modelID, IFCMAPCONVERSION);
+        if(ids.size>0){
+          const id = ids.get(0); const mc = ifcApi.GetLine(modelID, id);
+          IFCGeo.has = true;
+          IFCGeo.Eastings = mc.Eastings?.value ?? 0;
+          IFCGeo.Northings = mc.Northings?.value ?? 0;
+          IFCGeo.OrthogonalHeight = mc.OrthogonalHeight?.value ?? 0;
+          IFCGeo.Scale = mc.Scale?.value ?? 1.0;
+          IFCGeo.XAxisAbscissa = mc.XAxisAbscissa?.value ?? 1.0;
+          IFCGeo.XAxisOrdinate = mc.XAxisOrdinate?.value ?? 0.0;
+          text += `IfcMapConversion id ${id}\n  Eastings: ${IFCGeo.Eastings}\n  Northings: ${IFCGeo.Northings}\n  OrthogonalHeight: ${IFCGeo.OrthogonalHeight}\n  Scale: ${IFCGeo.Scale}\n  XAxisAbscissa: ${IFCGeo.XAxisAbscissa}\n  XAxisOrdinate: ${IFCGeo.XAxisOrdinate}\n`;
+        } else {
+          text += 'No IfcMapConversion found.';
+        }
+        pickedInfo.textContent = text;
+      } catch(err){ pickedInfo.textContent = 'IFC parse error: '+err; }
+      finally { ifcApi.CloseModel(modelID); }
     });
   </script>
 </body>
