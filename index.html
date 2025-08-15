@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>IFC → Cesium | GUID zoom, IFC coords, Stats, Rooms</title>
+  <title>IFC → Cesium | Preloader, GUID/Rooms, Floors</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
@@ -13,7 +13,7 @@
     .ui-right { position:absolute; top:66px; right:10px; z-index:1000; display:flex; flex-direction:column; gap:8px; }
     .card { background:#ffffffd9; backdrop-filter: blur(6px); border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; box-shadow:0 4px 14px rgba(0,0,0,.08); }
     .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
-    .row input, .row button, .row label { font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .row input, .row button, .row label, .row select { font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
     .row input[type="text"] { padding:6px 8px; border:1px solid #d1d5db; border-radius:8px; min-width:220px; }
     .row button { padding:6px 10px; border:1px solid #d1d5db; background:white; border-radius:8px; cursor:pointer; }
     .row button:hover { background:#f3f4f6; }
@@ -21,6 +21,16 @@
     .pre { margin:0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; white-space:pre-wrap; }
     .logo { position:absolute; bottom:16px; right:16px; z-index:1000; opacity:0.9; }
     .logo img { width:140px; }
+
+    /* Preloader */
+    .preloader{position:fixed;inset:0;background:#0b1020;display:flex;align-items:center;justify-content:center;z-index:2000;}
+    .pre-card{display:flex;flex-direction:column;align-items:center;gap:8px;color:#fff;text-align:center}
+    .pre-logo{width:120px;filter:drop-shadow(0 2px 14px rgba(0,0,0,.35))}
+    .pre-title{font:600 18px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;letter-spacing:.2px}
+    .pre-bar{width:320px;height:10px;background:rgba(255,255,255,.18);border-radius:999px;overflow:hidden}
+    .pre-fill{height:100%;width:0%;background:#fbbf24}
+    .pre-percent{font:12px;opacity:.9}
+    .preloader.hide{opacity:0;transition:opacity .6s ease;pointer-events:none}
   </style>
 </head>
 <body>
@@ -40,8 +50,6 @@
         <option value="">All</option>
       </select>
       <button id="btnFloor">Apply Floor</button>
-      <label class="badge" for="ifcFile">IFC Geo</label>
-      <input id="ifcFile" type="file" accept=".ifc" />
       <button id="btnScan">Scan Stats</button>
     </div>
   </div>
@@ -69,160 +77,175 @@
     </div>
   </div>
 
+  <!-- PRELOADER OVERLAY -->
+  <div id="preloader" class="preloader">
+    <div class="pre-card">
+      <img class="pre-logo" src="https://sv.ugm.ac.id/wp-content/uploads/sites/27/2021/09/Lambang-UGM-putih.png" alt="UGM"/>
+      <div class="pre-title">Pengelolaan Aset Warisan Budaya</div>
+      <div class="pre-bar"><div class="pre-fill" id="preFill"></div></div>
+      <div class="pre-percent" id="prePct">1%</div>
+    </div>
+  </div>
+
   <div class="logo"><img src="https://sv.ugm.ac.id/wp-content/uploads/sites/27/2021/09/Lambang-UGM-putih.png" alt="logo"/></div>
 
   <script type="module">
-// ===================== Init Cesium =====================
-Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJiNDJhNGIzMy1lYjk1LTQ5MTgtOGIxMy1iMjNkYWFjZTZjZGMiLCJpZCI6MzA1NDUzLCJpYXQiOjE3NDk4ODQ0NjF9.ZzfqWk4Sc_3zrTXoyumAzAVH4QavWxwZ5kLWHN6KZ4E';
-const viewer = new Cesium.Viewer('cesiumContainer',{
-  terrain: Cesium.Terrain.fromWorldTerrain(),
-  animation:false,timeline:false,homeButton:false,sceneModePicker:false,
-  geocoder:true,baseLayerPicker:true,navigationHelpButton:false,fullscreenButton:true,
-  selectionIndicator:false,infoBox:false
-});
-viewer.scene.shadowMap.enabled = true;
-viewer.shadows = true;
-viewer.scene.highDynamicRange = true;
-viewer.scene.globe.enableLighting = true;
-viewer.camera.flyTo({
-  destination: Cesium.Cartesian3.fromDegrees(110.37394,-7.77463,400),
-  orientation:{heading:Cesium.Math.toRadians(0),pitch:Cesium.Math.toRadians(-90)}
-});
-const tileset = await Cesium.Cesium3DTileset.fromIonAssetId(3591078);
-viewer.scene.primitives.add(tileset);
-await tileset.readyPromise; viewer.zoomTo(tileset);
+    // ========= Preloader (5s countdown + wait tileset ready) =========
+    const preEl = document.getElementById('preloader');
+    const preFill = document.getElementById('preFill');
+    const prePct = document.getElementById('prePct');
+    const prePromise = new Promise((resolve)=>{
+      let pct = 0; const id = setInterval(()=>{
+        pct = Math.min(100, pct + 1); // 100 steps * 50ms = 5000ms
+        preFill.style.width = pct + '%';
+        prePct.textContent = pct + '%';
+        if(pct >= 100){ clearInterval(id); resolve(); }
+      }, 50);
+    });
 
-// ===================== Helpers =====================
-const pickedInfo = document.getElementById('pickedInfo');
-const statsBox = document.getElementById('stats');
-let lastColored=[]; function clearHighlight(){for(const f of lastColored){try{f.color=Cesium.Color.WHITE;}catch{}} lastColored.length=0;} function highlightFeature(f){try{f.color=Cesium.Color.YELLOW;lastColored.push(f);}catch{}}
-async function flyToMatch(predicate,opt={}){
-  const w=viewer.canvas.clientWidth,h=viewer.canvas.clientHeight,steps=7;
-  for(let iy=1;iy<steps;iy++)for(let ix=1;ix<steps;ix++){
-    const pt=new Cesium.Cartesian2(Math.round((ix/steps)*w),Math.round((iy/steps)*h));
-    const picked=viewer.scene.drillPick(pt);
-    for(const p of picked){ if(typeof p.getProperty!=='function') continue; try{ if(predicate(p)){ const cart=viewer.scene.pickPosition(pt); if(Cesium.defined(cart)){ const c=Cesium.Cartographic.fromCartesian(cart); viewer.camera.flyTo({destination:Cesium.Cartesian3.fromRadians(c.longitude,c.latitude,Math.max(8,c.height+18)),orientation:{heading:viewer.camera.heading,pitch:Cesium.Math.toRadians(-35),roll:0},duration:opt.duration??1}); return true; } } }catch{} }
-  }
-  return false;
-}
+    // ===================== Init Cesium =====================
+    Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJiNDJhNGIzMy1lYjk1LTQ5MTgtOGIxMy1iMjNkYWFjZTZjZGMiLCJpZCI6MzA1NDUzLCJpYXQiOjE3NDk4ODQ0NjF9.ZzfqWk4Sc_3zrTXoyumAzAVH4QavWxwZ5kLWHN6KZ4E';
+    const viewer = new Cesium.Viewer('cesiumContainer',{
+      terrain: Cesium.Terrain.fromWorldTerrain(),
+      animation:false,timeline:false,homeButton:false,sceneModePicker:false,
+      geocoder:true,baseLayerPicker:true,navigationHelpButton:false,fullscreenButton:true,
+      selectionIndicator:false,infoBox:false
+    });
+    viewer.scene.shadowMap.enabled = true;
+    viewer.shadows = true;
+    viewer.scene.highDynamicRange = true;
+    viewer.scene.globe.enableLighting = true;
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(110.37394,-7.77463,400),
+      orientation:{heading:Cesium.Math.toRadians(0),pitch:Cesium.Math.toRadians(-90)}
+    });
 
-// IFC MapConversion store & projection
-const IFCGeo={has:false,Eastings:0,Northings:0,OrthogonalHeight:0,Scale:1,XAxisAbscissa:1,XAxisOrdinate:0};
-function projectLocalToMap(xLocal,yLocal){
-  const Xp=xLocal*IFCGeo.XAxisAbscissa + yLocal*IFCGeo.XAxisOrdinate;
-  const Yp=xLocal*(-IFCGeo.XAxisOrdinate) + yLocal*IFCGeo.XAxisAbscissa;
-  return {Xmap:IFCGeo.Eastings+IFCGeo.Scale*Xp, Ymap:IFCGeo.Northings+IFCGeo.Scale*Yp};
-}
+    const tileset = await Cesium.Cesium3DTileset.fromIonAssetId(3591078);
+    viewer.scene.primitives.add(tileset);
 
-// ===================== Picking =====================
-const handler=new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
-handler.setInputAction((click)=>{
-  const picked=viewer.scene.pick(click.position);
-  if(!picked||typeof picked.getProperty!=='function') return;
-  clearHighlight(); highlightFeature(picked);
-  const cart=viewer.scene.pickPosition(click.position);
-  let coordText='n/a', mapText='';
-  if(Cesium.defined(cart)){
-    const carto=Cesium.Cartographic.fromCartesian(cart);
-    const lon=Cesium.Math.toDegrees(carto.longitude), lat=Cesium.Math.toDegrees(carto.latitude), h=carto.height;
-    coordText=`lon: ${lon.toFixed(7)}
-lat: ${lat.toFixed(7)}
-h:   ${h.toFixed(3)} m`;
-    if(IFCGeo.has){ const m=tileset.root.computedTransform||tileset.root.transform; const inv=Cesium.Matrix4.inverse(m,new Cesium.Matrix4()); const local=Cesium.Matrix4.multiplyByPoint(inv,cart,new Cesium.Cartesian3()); const XY=projectLocalToMap(local.x,local.y); mapText=`
-X_map: ${XY.Xmap.toFixed(3)}
-Y_map: ${XY.Ymap.toFixed(3)}`; }
-    viewer.camera.flyTo({destination:Cesium.Cartesian3.fromRadians(carto.longitude,carto.latitude,Math.max(8,h+20)),orientation:{heading:viewer.camera.heading,pitch:Cesium.Math.toRadians(-35),roll:0},duration:0.9});
-  }
-  const ids=picked.getPropertyIds?p.getPropertyIds():[]; // fallback safe
-  const props={}; const pids=(picked.getPropertyIds&&picked.getPropertyIds())||[]; for(const id of pids){ props[id]=picked.getProperty(id); }
-  const ifcGuid=props.IfcGuid||props.IFC_GUID||props.GlobalId||props.globalId||props.elementId; const ifcType=props.IfcType||props.ifcClass||props.class||props.Type||props.Category;
-  const out=[`# BIM feature`, ifcGuid?`IfcGUID: ${ifcGuid}`:null, ifcType?`Type:    ${ifcType}`:null, `
-# All properties`, JSON.stringify(props,null,2), `
-# Pick position (WGS84)`, coordText, IFCGeo.has?`
-# IFC MapConversion (projected)
-${mapText}`:null].filter(Boolean).join('
-');
-  pickedInfo.textContent=out;
-  const tbody=document.querySelector('#attrTable tbody'); if(tbody){ tbody.innerHTML=''; Object.keys(props).sort().forEach(k=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td style="vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0">${k}</td><td style=\"vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0; word-break:break-all\">${String(props[k])}</td>`; tbody.appendChild(tr); }); }
-}, Cesium.ScreenSpaceEventType.LEFT_CLICK);
-handler.setInputAction(()=>clearHighlight(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+    // Wait for both: tileset ready & preloader done
+    await Promise.all([tileset.readyPromise, prePromise]);
+    viewer.zoomTo(tileset);
+    preEl.classList.add('hide'); setTimeout(()=> preEl.remove(), 700);
 
-// ===================== GUID / Room search =====================
-const guidInput=document.getElementById('guidInput');
-document.getElementById('btnGuid').addEventListener('click', async ()=>{
-  const guid=(guidInput.value||'').trim(); if(!guid){ tileset.style=undefined; return; }
-  const pat=guid.replace(/'/g,"\'");
-  const conditions=[["regexp('"+pat+"','i').test(${IfcGuid}) || regexp('"+pat+"','i').test(${GlobalId}) || regexp('"+pat+"','i').test(${IFC_GUID}) || regexp('"+pat+"','i').test(${elementId})","color('yellow',1.0)"],["true","color('white',0.85)"]];
-  try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{ tileset.style=undefined; }
-  const ok=await flyToMatch(f=>{ const v=f.getProperty('IfcGuid')||f.getProperty('GlobalId')||f.getProperty('IFC_GUID')||f.getProperty('elementId'); return v&&String(v).toLowerCase().includes(guid.toLowerCase()); },{duration:0.9});
-  if(!ok) viewer.flyTo(tileset,{duration:0.8});
-});
+    // ===================== Helpers =====================
+    const pickedInfo = document.getElementById('pickedInfo');
+    const statsBox = document.getElementById('stats');
+    let lastColored=[]; 
+    function clearHighlight(){ for(const f of lastColored){ try{ f.color = Cesium.Color.WHITE; }catch{} } lastColored.length=0; }
+    function highlightFeature(f){ try{ f.color = Cesium.Color.YELLOW; lastColored.push(f); }catch{} }
+    async function flyToMatch(predicate,opt={}){
+      const w=viewer.canvas.clientWidth,h=viewer.canvas.clientHeight,steps=7;
+      for(let iy=1;iy<steps;iy++){
+        for(let ix=1;ix<steps;ix++){
+          const pt=new Cesium.Cartesian2(Math.round((ix/steps)*w),Math.round((iy/steps)*h));
+          const picked=viewer.scene.drillPick(pt);
+          for(const p of picked){
+            if(typeof p.getProperty!=='function') continue;
+            try{ if(predicate(p)){
+              const cart=viewer.scene.pickPosition(pt);
+              if(Cesium.defined(cart)){
+                const c=Cesium.Cartographic.fromCartesian(cart);
+                viewer.camera.flyTo({
+                  destination: Cesium.Cartesian3.fromRadians(c.longitude,c.latitude, Math.max(8,c.height+18)),
+                  orientation: { heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35), roll: 0 },
+                  duration: opt.duration ?? 1
+                });
+                return true;
+              }
+            } }catch{}
+          }
+        }
+      }
+      return false;
+    }
 
-const roomInput=document.getElementById('roomInput');
-document.getElementById('btnRoom').addEventListener('click', async ()=>{
-  const name=(roomInput.value||'').trim(); if(!name) return; const pat=name.replace(/'/g,"\'");
-  // Only rooms/spaces
-  const condMatch="(regexp('"+pat+"','i').test(${Name}) || regexp('"+pat+"','i').test(${LongName}) || regexp('"+pat+"','i').test(${Room})) && (regexp('IfcSpace','i').test(${IfcType}) || regexp('space|room','i').test(${class}))";
-  const conditions=[[condMatch,"color('orange',1.0)"],["true","color('white',0.85)"]];
-  try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
-  const ok=await flyToMatch(f=>{ const type=(f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||'').toString(); if(!(/IfcSpace/i.test(type)||/(^|)(space|room)/i.test(type))) return false; const pnames=['Name','name','LongName','Room']; for(const k of pnames){ const v=f.getProperty(k); if(v&&String(v).toLowerCase().includes(name.toLowerCase())) return true; } return false; },{duration:0.9});
-  if(!ok) viewer.flyTo(tileset,{duration:0.8});
-});
+    // ===================== Picking =====================
+    const handler=new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    handler.setInputAction((click)=>{
+      const picked=viewer.scene.pick(click.position);
+      if(!picked||typeof picked.getProperty!=='function') return;
+      clearHighlight(); highlightFeature(picked);
 
-// ===================== Stats & Floors =====================
-const seen=new Set(); const counts={windows:0,doors:0}; const storeys=new Map(); const roomsByStorey=new Map();
-function considerFeature(f){
-  const guid=f.getProperty('IfcGuid')||f.getProperty('GlobalId')||f.getProperty('elementId'); if(guid&&seen.has(guid)) return; if(guid) seen.add(guid);
-  const type=(f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||f.getProperty('Type')||'').toString();
-  const name=(f.getProperty('Name')||f.getProperty('name')||f.getProperty('LongName')||'').toString();
-  const storey=(f.getProperty('Storey')||f.getProperty('Level')||f.getProperty('BuildingStorey')||f.getProperty('Floor')||'').toString();
-  if(/IfcWindow/i.test(type)||/(^|)window/i.test(type)) counts.windows++;
-  if(/IfcDoor/i.test(type)||/(^|)door/i.test(type)) counts.doors++;
-  if(storey){ storeys.set(storey,(storeys.get(storey)||0)+1); }
-  if(/IfcSpace/i.test(type)||/(^|)(space|room)/i.test(type)){ const key=storey||'(No Storey)'; if(!roomsByStorey.has(key)) roomsByStorey.set(key,new Set()); if(name) roomsByStorey.get(key).add(name); }
-}
-function processTile(tile){ const c=tile.content; const n=c?.featuresLength||0; for(let i=0;i<n;i++){ considerFeature(c.getFeature(i)); } }
-function refreshStatsBox(){ const levels=[...storeys.keys()].sort(); let lines=`Windows: ${counts.windows} | Doors: ${counts.doors}`; if(levels.length){ lines+=`
-Storeys (${levels.length}):`; for(const lv of levels){ lines+=`
-- ${lv}: ${storeys.get(lv)} elemen`; } } statsBox.textContent=lines; }
-function renderLevelsPanel(){ const el=document.getElementById('levelsPanel'); if(!roomsByStorey.size){ el.textContent='(Tidak ada data ruang terdeteksi)'; return; } let html=''; for(const [level,rooms] of roomsByStorey){ html+=`<div style="margin:6px 0; font-weight:600;">${level}</div>`; const arr=Array.from(rooms).sort(); html+=`<div style="display:flex; flex-wrap:wrap; gap:4px;">`+arr.map(r=>`<button class="room-btn" data-room="${r.replace(/"/g,'&quot;')}">${r}</button>`).join('')+`</div>`;} el.innerHTML=html; el.querySelectorAll('.room-btn').forEach(btn=>{ btn.addEventListener('click', async ()=>{ const name=btn.getAttribute('data-room'); roomInput.value=name; const pat=name.replace(/'/g,"\'"); const conditions=[["regexp('"+pat+"','i').test(${Name}) || regexp('"+pat+"','i').test(${LongName}) || regexp('"+pat+"','i').test(${Room})","color('orange',1.0)"],["true","color('white',0.85)"]]; try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{} const ok=await flyToMatch(f=>{ const pnames=['Name','name','LongName','Room']; for(const k of pnames){ const v=f.getProperty(k); if(v&&String(v).toLowerCase()===name.toLowerCase()) return true; } return false; },{duration:0.9}); if(!ok) viewer.flyTo(tileset,{duration:0.8}); }); }); }
+      const cart=viewer.scene.pickPosition(click.position);
+      let coordText='n/a';
+      if(Cesium.defined(cart)){
+        const carto=Cesium.Cartographic.fromCartesian(cart);
+        const lon=Cesium.Math.toDegrees(carto.longitude), lat=Cesium.Math.toDegrees(carto.latitude), h=carto.height;
+        coordText=`lon: ${lon.toFixed(7)}\nlat: ${lat.toFixed(7)}\nh:   ${h.toFixed(3)} m`;
+        viewer.camera.flyTo({destination:Cesium.Cartesian3.fromRadians(carto.longitude,carto.latitude,Math.max(8,h+20)),orientation:{heading:viewer.camera.heading,pitch:Cesium.Math.toRadians(-35),roll:0},duration:0.9});
+      }
 
-document.getElementById('btnScan').addEventListener('click',()=>{
-  seen.clear(); counts.windows=0; counts.doors=0; storeys.clear(); roomsByStorey.clear();
-  viewer.scene.frameState.commandList; tileset._selectedTiles && tileset._selectedTiles.forEach(t=>processTile(t));
-  tileset.tileVisible.addEventListener(processTile);
-  refreshStatsBox(); renderLevelsPanel();
-  // Populate floor dropdown
-  const dd=document.getElementById('floorFilter'); const cur=dd.value; dd.innerHTML='<option value="">All</option>' + [...storeys.keys()].sort().map(lv=>`<option value="${lv.replace(/"/g,'&quot;')}">${lv}</option>`).join(''); if([...storeys.keys()].includes(cur)) dd.value=cur;
-});
+      const props={}; const pids=(picked.getPropertyIds&&picked.getPropertyIds())||[]; for(const id of pids){ props[id]=picked.getProperty(id); }
+      const ifcGuid=props.IfcGuid||props.IFC_GUID||props.GlobalId||props.globalId||props.elementId;
+      const ifcType=props.IfcType||props.ifcClass||props.class||props.Type||props.Category;
+      const out=[`# BIM feature`, ifcGuid?`IfcGUID: ${ifcGuid}`:null, ifcType?`Type:    ${ifcType}`:null, `\n# All properties`, JSON.stringify(props,null,2), `\n# Pick position (WGS84)`, coordText].filter(Boolean).join('\n');
+      pickedInfo.textContent=out;
+      const tbody=document.querySelector('#attrTable tbody'); if(tbody){ tbody.innerHTML=''; Object.keys(props).sort().forEach(k=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td style="vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0">${k}</td><td style=\"vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0; word-break:break-all\">${String(props[k])}</td>`; tbody.appendChild(tr); }); }
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+    handler.setInputAction(()=>clearHighlight(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
 
-// Floor filter
-(document.getElementById('btnFloor')||{}).addEventListener?.('click',()=>{
-  const dd=document.getElementById('floorFilter'); const lv=(dd&&dd.value?dd.value.trim():'');
-  if(!lv){ try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions:[["true","color('white',0.85)"]]}});}catch{} return; }
-  const pat=lv.replace(/'/g,"\'"); const conditions=[["regexp('"+pat+"','i').test(${Storey}) || regexp('"+pat+"','i').test(${Level}) || regexp('"+pat+"','i').test(${BuildingStorey}) || regexp('"+pat+"','i').test(${Floor})","color('yellow',1.0)"],["true","color('white',0.2)"]];
-  try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
-});
+    // ===================== GUID / Room search =====================
+    const guidInput=document.getElementById('guidInput');
+    document.getElementById('btnGuid').addEventListener('click', async ()=>{
+      const guid=(guidInput.value||'').trim(); if(!guid){ tileset.style=undefined; return; }
+      const pat=guid.replace(/'/g,"\\'");
+      const conditions=[
+        ["regexp('"+pat+"','i').test(${IfcGuid}) || regexp('"+pat+"','i').test(${GlobalId}) || regexp('"+pat+"','i').test(${IFC_GUID}) || regexp('"+pat+"','i').test(${elementId})","color('yellow',1.0)"],
+        ["true","color('white',0.85)"]
+      ];
+      try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{ tileset.style=undefined; }
+      const ok=await flyToMatch(f=>{ const v=f.getProperty('IfcGuid')||f.getProperty('GlobalId')||f.getProperty('IFC_GUID')||f.getProperty('elementId'); return v&&String(v).toLowerCase().includes(guid.toLowerCase()); },{duration:0.9});
+      if(!ok) viewer.flyTo(tileset,{duration:0.8});
+    });
 
-// ===================== IFC Geo (MapConversion) =====================
-import { IfcAPI, IFCMAPCONVERSION, IFCSITE } from 'https://cdn.jsdelivr.net/npm/web-ifc@0.0.46/web-ifc-api.js';
-const ifcApi=new IfcAPI(); await ifcApi.Init(); ifcApi.SetWasmPath('https://cdn.jsdelivr.net/npm/web-ifc@0.0.46/');
-document.getElementById('ifcFile').addEventListener('change', async (e)=>{
-  const file=e.target.files?.[0]; if(!file) return; const buf=await file.arrayBuffer(); const modelID=ifcApi.OpenModel(buf);
-  try{
-    let text='# IFC Georeferencing
-'; const ids=ifcApi.GetLineIDsWithType(modelID,IFCMAPCONVERSION);
-    if(ids.size>0){ const id=ids.get(0); const mc=ifcApi.GetLine(modelID,id); IFCGeo.has=true; IFCGeo.Eastings=mc.Eastings?.value??0; IFCGeo.Northings=mc.Northings?.value??0; IFCGeo.OrthogonalHeight=mc.OrthogonalHeight?.value??0; IFCGeo.Scale=mc.Scale?.value??1; IFCGeo.XAxisAbscissa=mc.XAxisAbscissa?.value??1; IFCGeo.XAxisOrdinate=mc.XAxisOrdinate?.value??0; text+=`IfcMapConversion id ${id}
-  Eastings: ${IFCGeo.Eastings}
-  Northings: ${IFCGeo.Northings}
-  OrthogonalHeight: ${IFCGeo.OrthogonalHeight}
-  Scale: ${IFCGeo.Scale}
-  XAxisAbscissa: ${IFCGeo.XAxisAbscissa}
-  XAxisOrdinate: ${IFCGeo.XAxisOrdinate}
-`; } else { text+='No IfcMapConversion found.'; }
-    pickedInfo.textContent=text;
-  } catch(err){ pickedInfo.textContent='IFC parse error: '+err; } finally { ifcApi.CloseModel(modelID); }
-});
-</script>
+    const roomInput=document.getElementById('roomInput');
+    document.getElementById('btnRoom').addEventListener('click', async ()=>{
+      const name=(roomInput.value||'').trim(); if(!name) return; const pat=name.replace(/'/g,"\\'");
+      // Only rooms/spaces (IfcSpace/Space/Room)
+      const condMatch="(regexp('"+pat+"','i').test(${Name}) || regexp('"+pat+"','i').test(${LongName}) || regexp('"+pat+"','i').test(${Room})) && (regexp('IfcSpace','i').test(${IfcType}) || regexp('space|room','i').test(${class}))";
+      const conditions=[[condMatch,"color('orange',1.0)"],["true","color('white',0.85)"]];
+      try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
+      const ok=await flyToMatch(f=>{
+        const type=(f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||'').toString();
+        if(!(/IfcSpace/i.test(type) || /(\\b|^)(space|room)\\b/i.test(type))) return false;
+        const pnames=['Name','name','LongName','Room'];
+        for(const k of pnames){ const v=f.getProperty(k); if(v && String(v).toLowerCase().includes(name.toLowerCase())) return true; }
+        return false;
+      },{duration:0.9});
+      if(!ok) viewer.flyTo(tileset,{duration:0.8});
+    });
+
+    // ===================== Stats & Floors =====================
+    const seen=new Set(); const counts={windows:0,doors:0}; const storeys=new Map(); const roomsByStorey=new Map();
+    function considerFeature(f){
+      const guid=f.getProperty('IfcGuid')||f.getProperty('GlobalId')||f.getProperty('elementId'); if(guid&&seen.has(guid)) return; if(guid) seen.add(guid);
+      const type=(f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||f.getProperty('Type')||'').toString();
+      const name=(f.getProperty('Name')||f.getProperty('name')||f.getProperty('LongName')||'').toString();
+      const storey=(f.getProperty('Storey')||f.getProperty('Level')||f.getProperty('BuildingStorey')||f.getProperty('Floor')||'').toString();
+      if(/IfcWindow/i.test(type) || /(\\b|^)window\\b/i.test(type)) counts.windows++;
+      if(/IfcDoor/i.test(type) || /(\\b|^)door\\b/i.test(type)) counts.doors++;
+      if(storey){ storeys.set(storey,(storeys.get(storey)||0)+1); }
+      if(/IfcSpace/i.test(type) || /(\\b|^)(space|room)\\b/i.test(type)){ const key=storey||'(No Storey)'; if(!roomsByStorey.has(key)) roomsByStorey.set(key,new Set()); if(name) roomsByStorey.get(key).add(name); }
+    }
+    function processTile(tile){ const c=tile.content; const n=c?.featuresLength||0; for(let i=0;i<n;i++){ considerFeature(c.getFeature(i)); } }
+    function refreshStatsBox(){ const levels=[...storeys.keys()].sort(); let lines=`Windows: ${counts.windows} | Doors: ${counts.doors}`; if(levels.length){ lines+=`\nStoreys (${levels.length}):`; for(const lv of levels){ lines+=`\n- ${lv}: ${storeys.get(lv)} elemen`; } } statsBox.textContent=lines; }
+    function renderLevelsPanel(){ const el=document.getElementById('levelsPanel'); if(!roomsByStorey.size){ el.textContent='(Tidak ada data ruang terdeteksi)'; return; } let html=''; for(const [level,rooms] of roomsByStorey){ html+=`<div style="margin:6px 0; font-weight:600;">${level}</div>`; const arr=Array.from(rooms).sort(); html+=`<div style=\"display:flex; flex-wrap:wrap; gap:4px;\">`+arr.map(r=>`<button class=\"room-btn\" data-room=\"${r.replace(/"/g,'&quot;')}\">${r}</button>`).join('')+`</div>`;} el.innerHTML=html; el.querySelectorAll('.room-btn').forEach(btn=>{ btn.addEventListener('click', async ()=>{ const name=btn.getAttribute('data-room'); roomInput.value=name; const pat=name.replace(/'/g,"\\'"); const conditions=[["regexp('"+pat+"','i').test(${Name}) || regexp('"+pat+"','i').test(${LongName}) || regexp('"+pat+"','i').test(${Room})","color('orange',1.0)"],["true","color('white',0.85)"]]; try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{} const ok=await flyToMatch(f=>{ const pnames=['Name','name','LongName','Room']; for(const k of pnames){ const v=f.getProperty(k); if(v&&String(v).toLowerCase()===name.toLowerCase()) return true; } return false; },{duration:0.9}); if(!ok) viewer.flyTo(tileset,{duration:0.8}); }); }); }
+
+    document.getElementById('btnScan').addEventListener('click',()=>{
+      seen.clear(); counts.windows=0; counts.doors=0; storeys.clear(); roomsByStorey.clear();
+      viewer.scene.frameState.commandList; tileset._selectedTiles && tileset._selectedTiles.forEach(t=>processTile(t));
+      tileset.tileVisible.addEventListener(processTile);
+      refreshStatsBox(); renderLevelsPanel();
+      const dd=document.getElementById('floorFilter'); const cur=dd.value; dd.innerHTML='<option value="">All</option>' + [...storeys.keys()].sort().map(lv=>`<option value="${lv.replace(/"/g,'&quot;')}">${lv}</option>`).join(''); if([...storeys.keys()].includes(cur)) dd.value=cur;
+    });
+
+    (document.getElementById('btnFloor')||{}).addEventListener?.('click',()=>{
+      const dd=document.getElementById('floorFilter'); const lv=(dd&&dd.value?dd.value.trim():'');
+      if(!lv){ try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions:[["true","color('white',0.85)"]]}});}catch{} return; }
+      const pat=lv.replace(/'/g,"\\'"); const conditions=[["regexp('"+pat+"','i').test(${Storey}) || regexp('"+pat+"','i').test(${Level}) || regexp('"+pat+"','i').test(${BuildingStorey}) || regexp('"+pat+"','i').test(${Floor})","color('yellow',1.0)"],["true","color('white',0.2)"]];
+      try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
+    });
+  </script>
 </body>
 </html>
