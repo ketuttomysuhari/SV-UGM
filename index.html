@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>IFC → Cesium | Pick, BRep-aware properties, Zoom & IFC Georeferencing</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <style>
+    html, body, #cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; }
+    .ui { position:absolute; top:10px; left:10px; z-index:1000; display:flex; gap:8px; align-items:center; }
+    .card { background:#ffffffd9; backdrop-filter: blur(6px); border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; box-shadow:0 4px 14px rgba(0,0,0,.08); }
+    .row { display:flex; gap:6px; align-items:center; }
+    .row input, .row button, .row label { font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .row input[type="text"] { padding:6px 8px; border:1px solid #d1d5db; border-radius:8px; min-width:280px; }
+    .row button { padding:6px 10px; border:1px solid #d1d5db; background:white; border-radius:8px; cursor:pointer; }
+    .row button:hover { background:#f3f4f6; }
+    .info { position:absolute; bottom:12px; left:12px; z-index:1000; max-width:420px; }
+    .info pre { margin:0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; white-space:pre-wrap; }
+    .badge { display:inline-block; font-size:11px; padding:2px 6px; border-radius:999px; background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; margin-right:6px; }
+    .logo { position:absolute; bottom:16px; right:16px; z-index:1000; opacity:0.9; }
+    .logo img { width:140px; }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <!-- Minimal UI: search by IFC GUID, upload IFC to read georeferencing -->
+  <div class="ui card">
+    <div class="row">
+      <span class="badge">Query</span>
+      <input id="guidInput" type="text" placeholder="Filter highlight by IfcGUID (e.g., 3u1$zJ6nP8YwLwBz2lN1xw)" />
+      <button id="applyGuid">Apply</button>
+      <label class="badge" for="ifcFile">IFC Geo</label>
+      <input id="ifcFile" type="file" accept=".ifc" />
+    </div>
+  </div>
+
+  <div class="info card">
+    <div style="font-weight:600; margin-bottom:6px;">Picked feature</div>
+    <pre id="pickedInfo">Click a BIM element to see properties & coordinates…</pre>
+  </div>
+
+  <div class="logo"><img src="https://sv.ugm.ac.id/wp-content/uploads/sites/27/2021/09/Lambang-UGM-putih.png" alt="logo"/></div>
+
+  <script type="module">
+    // ──────────────────────────────────────────────────────────────────────────────
+    // 1) Cesium Viewer
+    // ──────────────────────────────────────────────────────────────────────────────
+    // IMPORTANT: replace with your own Cesium ion token & IFC-tiling asset ID
+    Cesium.Ion.defaultAccessToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJiNDJhNGIzMy1lYjk1LTQ5MTgtOGIxMy1iMjNkYWFjZTZjZGMiLCJpZCI6MzA1NDUzLCJpYXQiOjE3NDk4ODQ0NjF9.ZzfqWk4Sc_3zrTXoyumAzAVH4QavWxwZ5kLWHN6KZ4E';
+"; // ← replace!
+
+    const viewer = new Cesium.Viewer('cesiumContainer', {
+      terrain: Cesium.Terrain.fromWorldTerrain(),
+      animation:false, timeline:false, homeButton:false,
+      sceneModePicker:false, geocoder:true, baseLayerPicker:true,
+      navigationHelpButton:false, fullscreenButton:true,
+      selectionIndicator:false, infoBox:false
+    });
+
+    // Set an initial camera (Yogyakarta area as example) – adjust as needed
+    viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(110.37394, -7.77463, 400),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-60), roll: 0 }
+    });
+
+    // Load BIM 3D Tiles (converted from IFC via Cesium ion)
+    const tileset = await Cesium.Cesium3DTileset.fromIonAssetId(3591078);
+    viewer.scene.primitives.add(tileset);
+    await tileset.readyPromise;
+    viewer.zoomTo(tileset);
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // 2) Pick & highlight features (element-level). Print props & WGS84 coords
+    //    Note: 3D Tiles are triangulated meshes derived from IFC B-Rep. We can
+    //    query element/face metadata if present, but not native B-Rep solids.
+    // ──────────────────────────────────────────────────────────────────────────────
+    let lastColored = [];
+
+    function clearHighlight(){
+      for(const f of lastColored){ try { f.color = Cesium.Color.WHITE; } catch(e){} }
+      lastColored.length = 0;
+    }
+
+    function highlightFeature(feature){
+      try { feature.color = Cesium.Color.YELLOW; lastColored.push(feature); } catch(e){}
+    }
+
+    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    handler.setInputAction((click) => {
+      const picked = viewer.scene.pick(click.position);
+      if(!picked || typeof picked.getProperty !== 'function') return;
+
+      clearHighlight();
+      highlightFeature(picked);
+
+      // Compute WGS84 coords at the clicked point
+      const cart = viewer.scene.pickPosition(click.position);
+      let coordText = 'n/a';
+      if(Cesium.defined(cart)){
+        const carto = Cesium.Cartographic.fromCartesian(cart);
+        const lon = Cesium.Math.toDegrees(carto.longitude);
+        const lat = Cesium.Math.toDegrees(carto.latitude);
+        const h = carto.height;
+        coordText = `lon: ${lon.toFixed(7)}\nlat: ${lat.toFixed(7)}\nh:   ${h.toFixed(3)} m`;
+
+        // Smooth zoom toward the picked point
+        viewer.camera.flyTo({
+          destination: Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, Math.max(8.0, h + 20.0)),
+          orientation: { heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35), roll: 0 },
+          duration: 0.9
+        });
+      }
+
+      // Dump all available per-feature properties (incl. IFC GUID if kept)
+      const ids = (picked.getPropertyIds && picked.getPropertyIds()) || [];
+      const props = {};
+      for(const id of ids){ props[id] = picked.getProperty(id); }
+
+      // Some common property aliases across BIM pipelines
+      const ifcGuid = props.IfcGuid || props.IFC_GUID || props.GlobalId || props.globalId || props.elementId;
+      const ifcType = props.IfcType || props.ifcClass || props.class || props.Type || props.Category;
+
+      const out = [
+        `# BIM feature`,
+        ifcGuid ? `IfcGUID: ${ifcGuid}` : null,
+        ifcType ? `Type:    ${ifcType}` : null,
+        `\n# All properties`,
+        JSON.stringify(props, null, 2),
+        `\n# Pick position (WGS84)`,
+        coordText
+      ].filter(Boolean).join('\n');
+
+      document.getElementById('pickedInfo').textContent = out;
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    // Clear highlight with right click
+    handler.setInputAction(() => clearHighlight(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // 3) Simple filter/highlight by IfcGUID using tile styling
+    //    This emulates a "query" (e.g., Boundary-Rep → triangulated faces) by
+    //    selecting elements whose metadata match the GUID. If your ion tiling
+    //    preserved per-face featureIds, you can extend this to face-level.
+    // ──────────────────────────────────────────────────────────────────────────────
+    const guidInput = document.getElementById('guidInput');
+    document.getElementById('applyGuid').addEventListener('click', () => {
+      const guid = (guidInput.value || '').trim();
+      if(!guid){ tileset.style = undefined; return; }
+
+      // Try common property names – adjust if your pipeline uses others
+      const fields = ["${IfcGuid}", "${GlobalId}", "${IFC_GUID}", "${elementId}"];
+      const showExpr = fields.map(f => `(${f} == '${guid}')`).join(' || ');
+      const colorExpr = `(${showExpr}) ? color('yellow', 1.0) : color('white', 0.8)`;
+
+      tileset.style = new Cesium.Cesium3DTileStyle({
+        color: colorExpr
+      });
+
+      // Optional: fly to the tileset (the matching part will be highlighted)
+      viewer.flyTo(tileset, { duration: 0.8 });
+    });
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // 4) OPTIONAL – Read IFC georeferencing (IfcMapConversion / IfcSite) on client
+    //    This prints the coordinates that exist *inside the IFC* (CRS + offsets).
+    //    Requires web-ifc (WASM). Works for reasonably sized IFCs.
+    // ──────────────────────────────────────────────────────────────────────────────
+    import { IfcAPI, IFCMAPCONVERSION, IFCCOORDINATEREFERENCESYSTEM, IFCSITE } from 'https://unpkg.com/web-ifc@0.0.46/web-ifc-api.js';
+
+    const ifcApi = new IfcAPI();
+    await ifcApi.Init();
+    // Point the wasm path to the CDN (or host locally for production)
+    ifcApi.SetWasmPath('https://unpkg.com/web-ifc@0.0.46/');
+
+    document.getElementById('ifcFile').addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if(!file) return;
+      const buf = await file.arrayBuffer();
+      const modelID = ifcApi.OpenModel(buf);
+
+      try {
+        // Read IfcMapConversion (projected CRS mapping of local ECS → map CRS)
+        const mapConvIDs = ifcApi.GetLineIDsWithType(modelID, IFCMAPCONVERSION);
+        let geoText = '# IFC Georeferencing\n';
+        if(mapConvIDs.size > 0){
+          const id = mapConvIDs.get(0);
+          const mc = ifcApi.GetLine(modelID, id);
+          // Access core parameters (nullable)
+          const Eastings = mc.Eastings?.value;       // meters
+          const Northings = mc.Northings?.value;     // meters
+          const OrthogonalHeight = mc.OrthogonalHeight?.value; // meters
+          const Scale = mc.Scale?.value ?? 1.0;
+          const XAxisAbscissa = mc.XAxisAbscissa?.value ?? 1.0;
+          const XAxisOrdinate = mc.XAxisOrdinate?.value ?? 0.0;
+          const TargetCRS = mc.TargetCRS?.value;     // ref to IfcCoordinateReferenceSystem
+
+          geoText += `IfcMapConversion (id ${id})\n`+
+                     `  Eastings:           ${Eastings ?? 'n/a'}\n`+
+                     `  Northings:          ${Northings ?? 'n/a'}\n`+
+                     `  OrthogonalHeight:   ${OrthogonalHeight ?? 'n/a'}\n`+
+                     `  Scale:              ${Scale}\n`+
+                     `  XAxisAbscissa:      ${XAxisAbscissa}\n`+
+                     `  XAxisOrdinate:      ${XAxisOrdinate}\n`;
+
+          if(TargetCRS){
+            const crs = ifcApi.GetLine(modelID, TargetCRS);
+            // Typical fields: Name, GeodeticDatum, MapProjection, MapZone, VerticalDatum
+            geoText += `  TargetCRS:          ${crs.Name?.value ?? 'n/a'}\n`+
+                       `  GeodeticDatum:      ${crs.GeodeticDatum?.value ?? 'n/a'}\n`+
+                       `  MapProjection:      ${crs.MapProjection?.value ?? 'n/a'}\n`+
+                       `  MapZone:            ${crs.MapZone?.value ?? 'n/a'}\n`+
+                       `  VerticalDatum:      ${crs.VerticalDatum?.value ?? 'n/a'}\n`;
+          }
+
+          geoText += `\nFormula (2D):\n`+
+                     `  [X_map]   [Eastings]   [ Scale  0 ] [ X_local ]\n`+
+                     `  [Y_map] = [Northings] + [  0   Scale] [ Y_local ] rotated by X-axis azimuth:\n`+
+                     `  X' =  X_local * XAxisAbscissa + Y_local * XAxisOrdinate\n`+
+                     `  Y' =  X_local * (-XAxisOrdinate) + Y_local * XAxisAbscissa\n`+
+                     `  then X_map = Eastings  + Scale * X'\n`+
+                     `       Y_map = Northings + Scale * Y'\n`;
+        } else {
+          geoText += 'No IfcMapConversion found.\n';
+        }
+
+        // Fallback: IfcSite.RefLatitude/RefLongitude (degrees, minutes, seconds)
+        const siteIDs = ifcApi.GetLineIDsWithType(modelID, IFCSITE);
+        if(siteIDs.size > 0){
+          const sid = siteIDs.get(0);
+          const site = ifcApi.GetLine(modelID, sid);
+          const dmsToDeg = (arr) => {
+            if(!arr) return null;
+            const s = (arr[0]?.value ?? 0);
+            const m = (arr[1]?.value ?? 0);
+            const sec = (arr[2]?.value ?? 0);
+            const frac = (arr[3]?.value ?? 0);
+            const sign = s < 0 ? -1 : 1; // IFC may encode sign in degrees
+            return sign * (Math.abs(s) + m/60 + (sec+frac)/3600);
+          };
+          const lat = dmsToDeg(site.RefLatitude?.parameters);
+          const lon = dmsToDeg(site.RefLongitude?.parameters);
+          const elev = site.RefElevation?.value;
+          if(lat!=null && lon!=null){
+            geoText += `\nIfcSite geodetic ref (WGS84-ish):\n  lat: ${lat.toFixed(7)}\n  lon: ${lon.toFixed(7)}\n  elev: ${elev ?? 'n/a'} m\n`;
+          }
+        }
+
+        document.getElementById('pickedInfo').textContent = geoText;
+      } catch(err){
+        document.getElementById('pickedInfo').textContent = 'IFC parse error: '+ err;
+      } finally {
+        ifcApi.CloseModel(modelID);
+      }
+    });
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Notes on B-Rep queries in Cesium:
+    // - IFC stores true Boundary Representation (IfcFacetedBrep/IfcAdvancedBrep, etc.).
+    // - Cesium displays triangulated meshes via 3D Tiles/glTF. Native B-Rep ops are
+    //   not available at runtime. However, if your tiling pipeline preserves per-
+    //   face/element featureIds and properties, you can query them (picked.getProperty)
+    //   and style them. For genuine B-Rep computations, use IFC.js (web-ifc) off-screen
+    //   to compute face normals/areas and report back to the UI.
+    // ──────────────────────────────────────────────────────────────────────────────
+  </script>
+</body>
+</html>
