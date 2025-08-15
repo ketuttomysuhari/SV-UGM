@@ -54,6 +54,7 @@
       </select>
       <button id="btnFloor">Apply Floor</button>
       <button id="btnScan">Scan Stats</button>
+      <button id="btnClear">Clear highlight</button>
     </div>
   </div>
 
@@ -144,11 +145,23 @@
     const statsBox = document.getElementById('stats');
 
     // Selection via tileset.style using picked properties
-    function escapeRe(s){ return String(s).replace(/[.*+?^${}()|[\]\]/g, '\$&'); }
+    function escapeRe(s){
+      // Escape regex special chars safely
+      return String(s).replace(/[.*+?^${}()|[\]\]/g, '\$&');
+    }()|[\]\]/g, '\$&'); }
     function selectByProps(props){
+      const fieldToken = (k) => ({
+        'IfcGuid': '${IfcGuid}', 'IFC_GUID':'${IFC_GUID}', 'GlobalId':'${GlobalId}', 'globalId':'${globalId}',
+        'elementId':'${elementId}', 'id':'${id}', 'ID':'${ID}', 'Name':'${Name}'
+      })[k];
       const keysOrder = ['IfcGuid','IFC_GUID','GlobalId','globalId','elementId','id','ID'];
       let tests = [];
-      for(const k of keysOrder){ if(props[k]){ const v = escapeRe(props[k]); tests.push(`regexp('^${v}$','i').test(\${${k}})`); break; } }
+      for(const k of keysOrder){ if(props[k]){ const v = escapeRe(props[k]); const tok = fieldToken(k); if(tok){ tests.push("regexp('"+v+"','i').test("+tok+")"); break; } } }
+      if(tests.length===0 && props.Name){ const v = escapeRe(props.Name); tests.push("regexp('"+v+"','i').test("+fieldToken('Name')+")"); }
+      if(!tests.length){ tileset.style = undefined; return; }
+      const conditions = [ [ '('+tests.join(') || (')+')', "color('yellow', 1.0)" ], [ 'true', "color('white', 0.85)" ] ];
+      try{ tileset.style = new Cesium.Cesium3DTileStyle({ color: { conditions } }); }catch(e){ console.warn('style error', e); }
+    }$','i').test(\${${k}})`); break; } }
       if(tests.length===0 && props.Name){ const v = escapeRe(props.Name); tests.push(`regexp('^${v}$','i').test(\${Name})`); }
       if(!tests.length){ tileset.style = undefined; return; }
       const conditions = [ [ `(${tests.join(') || (')})`, "color('yellow', 1.0)" ], [ 'true', "color('white', 0.85)" ] ];
@@ -185,6 +198,7 @@
 
     // ===================== Picking =====================
     const handler=new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    let lastPickCarto = null;
     handler.setInputAction((click)=>{
       const picked=viewer.scene.pick(click.position);
       if(!picked||typeof picked.getProperty!=='function') return;
@@ -193,24 +207,46 @@
       const cart=viewer.scene.pickPosition(click.position);
       let coordText='n/a';
       if(Cesium.defined(cart)){
-        const carto=Cesium.Cartographic.fromCartesian(cart);
+        const carto=Cesium.Cartographic.fromCartesian(cart); lastPickCarto = carto;
         const lon=Cesium.Math.toDegrees(carto.longitude), lat=Cesium.Math.toDegrees(carto.latitude), h=carto.height;
-        coordText=`lon: ${lon.toFixed(7)}\nlat: ${lat.toFixed(7)}\nh:   ${h.toFixed(3)} m`;
-        viewer.camera.flyTo({destination:Cesium.Cartesian3.fromRadians(carto.longitude,carto.latitude,Math.max(8,h+20)),orientation:{heading:viewer.camera.heading,pitch:Cesium.Math.toRadians(-35),roll:0},duration:0.9});
+        coordText=`lon: ${lon.toFixed(7)}
+lat: ${lat.toFixed(7)}
+h:   ${h.toFixed(3)} m`;
+        viewer.camera.flyTo({destination:Cesium.Cartesian3.fromRadians(carto.longitude,carto.latitude,Math.max(8,h+20)),orientation:{heading:viewer.camera.heading,pitch:Cesium.Math.toRadians(-35)},duration:0.9});
       }
 
       const props={};
       const pids=(picked.getPropertyIds&&picked.getPropertyIds())||[];
       for(const id of pids){ try{ props[id]=picked.getProperty(id); }catch{} }
-      // Persist highlight via tileset.style based on identifier
       selectByProps(props);
       const ifcGuid=props.IfcGuid||props.IFC_GUID||props.GlobalId||props.globalId||props.elementId;
       const ifcType=props.IfcType||props.ifcClass||props.class||props.Type||props.Category;
-      const out=[`# BIM feature`, ifcGuid?`IfcGUID: ${ifcGuid}`:null, ifcType?`Type:    ${ifcType}`:null, `\n# All properties`, JSON.stringify(props,null,2), `\n# Pick position (WGS84)`, coordText].filter(Boolean).join('\n');
+      const out=[`# BIM feature`, ifcGuid?`IfcGUID: ${ifcGuid}`:null, ifcType?`Type:    ${ifcType}`:null, `
+# All properties`, JSON.stringify(props,null,2), `
+# Pick position (WGS84)`, coordText].filter(Boolean).join('
+');
       pickedInfo.textContent=out;
       const tbody=document.querySelector('#attrTable tbody'); if(tbody){ tbody.innerHTML=''; Object.keys(props).sort().forEach(k=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td style="vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0">${k}</td><td style=\"vertical-align:top; padding:2px 6px; border-bottom:1px solid #f0f0f0; word-break:break-all\">${String(props[k])}</td>`; tbody.appendChild(tr); }); }
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    // Double-click to zoom to last picked element
+    handler.setInputAction((click)=>{
+      if(lastPickCarto){
+        viewer.camera.flyTo({
+          destination: Cesium.Cartesian3.fromRadians(lastPickCarto.longitude,lastPickCarto.latitude, Math.max(8,lastPickCarto.height+15)),
+          orientation:{ heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35) }, duration: 0.6
+        });
+      } else {
+        // fallback: pick under double-click
+        const picked=viewer.scene.pick(click.position);
+        if(picked){ const cart=viewer.scene.pickPosition(click.position); if(Cesium.defined(cart)){ const c=Cesium.Cartographic.fromCartesian(cart); viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromRadians(c.longitude,c.latitude, Math.max(8,c.height+15)), orientation:{ heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35) }, duration: 0.6 }); } }
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
     handler.setInputAction(()=>clearHighlight(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+
+    // Clear button
+    (document.getElementById('btnClear')||{}).addEventListener?.('click', ()=>{ tileset.style = undefined; pickedInfo.textContent='Cleared.'; const tbody=document.querySelector('#attrTable tbody'); if(tbody) tbody.innerHTML=''; lastPickCarto=null; });
 
     // ===================== GUID / Room search =====================
     const guidInput=document.getElementById('guidInput');
