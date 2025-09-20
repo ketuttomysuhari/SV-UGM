@@ -2,16 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>IFC → Cesium | Preloader, Picking & Stats</title>
+  <title>IFC → Cesium | Click Colors, Preloader, Picking & Stats</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
   <style>
     html, body, #cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; }
-    /* Fade-in for Cesium container */
     #cesiumContainer { opacity: 0; transition: opacity .8s ease; }
     #cesiumContainer.show { opacity: 1; }
-    /* UI blocks */
+
     .ui-left { position:absolute; top:10px; left:10px; z-index:1000; display:flex; gap:8px; align-items:center; }
     .ui-right { position:absolute; top:66px; right:10px; z-index:1000; display:flex; flex-direction:column; gap:8px; }
     .card { background:#ffffffd9; backdrop-filter: blur(6px); border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; box-shadow:0 4px 14px rgba(0,0,0,.08); }
@@ -25,7 +24,6 @@
     .logo { position:absolute; bottom:16px; right:16px; z-index:1000; opacity:0.9; }
     .logo img { width:140px; }
 
-    /* Preloader */
     .preloader{position:fixed;inset:0;background:#0b1020;display:flex;align-items:center;justify-content:center;z-index:2000;}
     .pre-card{display:flex;flex-direction:column;align-items:center;gap:8px;color:#fff;text-align:center}
     .pre-logo{width:120px;filter:drop-shadow(0 2px 14px rgba(0,0,0,.35))}
@@ -34,6 +32,9 @@
     .pre-fill{height:100%;width:0%;background:#fbbf24}
     .pre-percent{font:12px;opacity:.9}
     .preloader.hide{opacity:0;transition:opacity .6s ease;pointer-events:none}
+
+    canvas { cursor: crosshair; }
+    .room-btn.active{ outline:2px solid #10b981; }
   </style>
 </head>
 <body>
@@ -73,11 +74,11 @@
     <div class="card">
       <div style="font-weight:600; margin-bottom:6px;">Model stats</div>
       <pre id="stats" class="pre">Windows: 0 | Doors: 0 | Storeys: -
-(Lanjutkan dengan tombol "Scan Stats")</pre>
+(Press "Scan Stats")</pre>
     </div>
     <div class="card">
       <div style="font-weight:600; margin-bottom:6px;">Floors & Rooms</div>
-      <div id="levelsPanel" class="pre">(Tekan "Scan Stats" untuk menampilkan daftar lantai & ruang)</div>
+      <div id="levelsPanel" class="pre">(Press "Scan Stats" to list floors & rooms)</div>
     </div>
   </div>
 
@@ -121,7 +122,6 @@
       geocoder:true,baseLayerPicker:true,navigationHelpButton:false,fullscreenButton:true,
       selectionIndicator:false,infoBox:false
     });
-    // Improve pick robustness
     viewer.scene.pickTranslucentDepth = true;
     viewer.scene.globe.depthTestAgainstTerrain = false;
     viewer.scene.shadowMap.enabled = true;
@@ -146,84 +146,97 @@
 
     function escapeHtml(s){ return String(s).replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
 
-    let lastColored=[];
-    function clearHighlight(){ for(const f of lastColored){ try{ f.color = Cesium.Color.WHITE; }catch{} } lastColored.length=0; }
-    function highlightFeature(f){ try{ f.color = Cesium.Color.YELLOW; lastColored.push(f); }catch{} }
+    // Color cycling palette
+    const palette = [
+      Cesium.Color.YELLOW,
+      Cesium.Color.CYAN,
+      Cesium.Color.MAGENTA,
+      Cesium.Color.LIME,
+      Cesium.Color.ORANGE
+    ];
 
-    async function flyToMatch(predicate,opt={}){
-      const w=viewer.canvas.clientWidth,h=viewer.canvas.clientHeight,steps=7;
-      for(let iy=1;iy<steps;iy++){
-        for(let ix=1;ix<steps;ix++){
-          const pt=new Cesium.Cartesian2(Math.round((ix/steps)*w),Math.round((iy/steps)*h));
-          const picked=viewer.scene.drillPick(pt);
-          for(const p of picked){
-            if(typeof p.getProperty!=='function') continue;
-            try{ if(predicate(p)){
-              const cart=viewer.scene.pickPosition(pt);
-              if(Cesium.defined(cart)){
-                const c=Cesium.Cartographic.fromCartesian(cart);
-                viewer.camera.flyTo({
-                  destination: Cesium.Cartesian3.fromRadians(c.longitude,c.latitude, Math.max(8,c.height+18)),
-                  orientation: { heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35), roll: 0 },
-                  duration: opt.duration ?? 1
-                });
-                return true;
-              }
-            } }catch{}
-          }
-        }
+    // Track colored features by stable key (prefer IfcGUID)
+    const colorIndexByKey = new Map();
+    const featureByKey = new Map();
+
+    function featureKey(f){
+      try {
+        const guid = f.getProperty('IfcGuid')||f.getProperty('GlobalId')||f.getProperty('IFC_GUID')||f.getProperty('elementId');
+        if (guid) return 'guid:'+String(guid);
+      } catch {}
+      if (typeof f.getFeatureId === 'function') {
+        try { return 'fid:'+f.getFeatureId(); } catch {}
       }
-      return false;
+      if (typeof f.featureId === 'number') return 'fid:'+f.featureId;
+      if (typeof f._batchId === 'number') return 'bid:'+f._batchId; // legacy fallback
+      return 'rand:'+Math.random();
     }
 
-    // Limit interaction to a single building name (best-effort)
-    const buildingMask = /Gedung Pantja Dharma/i;
-    function inTargetBuilding(props){
-      for(const k of Object.keys(props)){
-        const v = props[k];
-        if(v && String(v).match(buildingMask)) return true;
-      }
-      return false;
+    function setFeatureColor(f, color){
+      try { f.color = color; } catch {}
     }
 
-    // ===================== Picking =====================
+    function clearAllHighlights(){
+      for (const [k,f] of featureByKey.entries()) { try { f.color = Cesium.Color.WHITE; } catch {} }
+      colorIndexByKey.clear();
+      featureByKey.clear();
+      tileset.style = undefined;
+      pickedInfo.textContent = 'Cleared.';
+      const tbody=document.querySelector('#attrTable tbody');
+      if(tbody) tbody.innerHTML='';
+    }
+
+    function flyToCartesian(cart){
+      if (!Cesium.defined(cart)) return;
+      const c = Cesium.Cartographic.fromCartesian(cart);
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromRadians(c.longitude,c.latitude, Math.max(8,c.height+18)),
+        orientation: { heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35), roll: 0 },
+        duration: 0.8
+      });
+    }
+
+    // ===================== Picking with color cycling =====================
     const handler=new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
     let lastPickCarto = null;
+
     handler.setInputAction((click)=>{
-      // Try to find a picked feature that belongs to the target building
       const picks = viewer.scene.drillPick(click.position);
       let picked = null;
       for(const p of picks){ if(typeof p.getProperty==='function'){ picked = p; break; } }
       if(!picked) return;
-      clearHighlight(); highlightFeature(picked);
+
+      const key = featureKey(picked);
+      const cur = colorIndexByKey.get(key) ?? -1;
+      const next = (cur + 1) % palette.length; // cycle
+      colorIndexByKey.set(key, next);
+      featureByKey.set(key, picked);
+      setFeatureColor(picked, palette[next]);
 
       const cart=viewer.scene.pickPosition(click.position);
-      let coordText='n/a';
       if(Cesium.defined(cart)){
-        const carto=Cesium.Cartographic.fromCartesian(cart); lastPickCarto = carto;
-        const lon=Cesium.Math.toDegrees(carto.longitude), lat=Cesium.Math.toDegrees(carto.latitude), h=carto.height;
-        coordText=`lon: ${lon.toFixed(7)}\nlat: ${lat.toFixed(7)}\nh:   ${h.toFixed(3)} m`;
+        lastPickCarto = Cesium.Cartographic.fromCartesian(cart);
       }
 
-      // Gather properties for the top-most candidate first
-      let props={}; const pids=(picked.getPropertyIds&&picked.getPropertyIds())||[]; for(const id of pids){ try{ props[id]=picked.getProperty(id); }catch{} }
-      // If not in the target building, search other picks under cursor
-      if(!inTargetBuilding(props)){
-        for(const p of picks){ if(typeof p.getProperty!=='function') continue; const ids=(p.getPropertyIds&&p.getPropertyIds())||[]; const tmp={}; for(const id of ids){ try{ tmp[id]=p.getProperty(id);}catch{} } if(inTargetBuilding(tmp)){ picked=p; props=tmp; clearHighlight(); highlightFeature(picked); break; } }
-      }
-      // If still not matched, just return quietly
-      if(!inTargetBuilding(props)) return;
-
+      // Show properties
+      const props={};
+      const ids=(picked.getPropertyIds&&picked.getPropertyIds())||[];
+      for(const id of ids){ try{ props[id]=picked.getProperty(id);}catch{} }
       const ifcGuid=props.IfcGuid||props.IFC_GUID||props.GlobalId||props.globalId||props.elementId;
       const ifcType=props.IfcType||props.ifcClass||props.class||props.Type||props.Category;
+      const coordText = lastPickCarto
+        ? `lon: ${Cesium.Math.toDegrees(lastPickCarto.longitude).toFixed(7)}
+lat: ${Cesium.Math.toDegrees(lastPickCarto.latitude).toFixed(7)}
+h:   ${lastPickCarto.height.toFixed(3)} m`
+        : 'n/a';
       const out = [
-        `# BIM feature`,
+        `# BIM feature (click to cycle colors)`,
         ifcGuid?`IfcGUID: ${ifcGuid}`:null,
         ifcType?`Type:    ${ifcType}`:null,
-        `\n# All properties`,
-        JSON.stringify(props,null,2),
         `\n# Pick position (WGS84)`,
-        coordText
+        coordText,
+        `\n# All properties`,
+        JSON.stringify(props,null,2)
       ].filter(Boolean).join('\n');
       pickedInfo.textContent = out;
       const tbody=document.querySelector('#attrTable tbody');
@@ -237,27 +250,21 @@
       }
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-    // Double-click to zoom to last picked element
+    // Double-click to zoom near cursor
     handler.setInputAction((click)=>{
-      if(lastPickCarto){
-        viewer.camera.flyTo({
-          destination: Cesium.Cartesian3.fromRadians(lastPickCarto.longitude,lastPickCarto.latitude, Math.max(8,lastPickCarto.height+15)),
-          orientation:{ heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35) }, duration: 0.6
-        });
-      } else {
-        const picked=viewer.scene.pick(click.position);
-        if(picked){ const cart=viewer.scene.pickPosition(click.position); if(Cesium.defined(cart)){ const c=Cesium.Cartographic.fromCartesian(cart); viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromRadians(c.longitude,c.latitude, Math.max(8,c.height+15)), orientation:{ heading: viewer.camera.heading, pitch: Cesium.Math.toRadians(-35) }, duration: 0.6 }); } }
-      }
+      const cart=viewer.scene.pickPosition(click.position);
+      flyToCartesian(cart);
     }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
-    handler.setInputAction(()=>clearHighlight(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+    // Right-click clears ALL highlights
+    handler.setInputAction(()=>clearAllHighlights(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
 
     // Clear button
-    (document.getElementById('btnClear')||{}).addEventListener?.('click', ()=>{ tileset.style = undefined; pickedInfo.textContent='Cleared.'; const tbody=document.querySelector('#attrTable tbody'); if(tbody) tbody.innerHTML=''; lastPickCarto=null; });
+    (document.getElementById('btnClear')||{}).addEventListener?.('click', ()=> clearAllHighlights());
 
-    // ===================== GUID / Room search =====================
+    // ===================== GUID / Room search via style =====================
     const guidInput=document.getElementById('guidInput');
-    document.getElementById('btnGuid').addEventListener('click', async ()=>{
+    document.getElementById('btnGuid').addEventListener('click', ()=>{
       const guid=(guidInput.value||'').trim(); if(!guid){ tileset.style=undefined; return; }
       const pat=guid.replace(/'/g,"\\'");
       const conditions=[
@@ -265,55 +272,100 @@
         ["true","color('white',0.85)"]
       ];
       try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{ tileset.style=undefined; }
-      const ok=await flyToMatch(f=>{ const v=f.getProperty('IfcGuid')||f.getProperty('GlobalId')||f.getProperty('IFC_GUID')||f.getProperty('elementId'); return v&&String(v).toLowerCase().includes(guid.toLowerCase()); },{duration:0.9});
-      if(!ok) viewer.flyTo(tileset,{duration:0.8});
     });
 
     const roomInput=document.getElementById('roomInput');
-    document.getElementById('btnRoom').addEventListener('click', async ()=>{
+    document.getElementById('btnRoom').addEventListener('click', ()=>{
       const name=(roomInput.value||'').trim(); if(!name) return; const pat=name.replace(/'/g,"\\'");
-      // Only rooms/spaces (best-effort)
       const condMatch="(regexp('"+pat+"','i').test(${Name}) || regexp('"+pat+"','i').test(${LongName}) || regexp('"+pat+"','i').test(${Room})) && (regexp('IfcSpace','i').test(${IfcType}) || regexp('space|room','i').test(${class}))";
       const conditions=[[condMatch,"color('orange',1.0)"],["true","color('white',0.85)"]];
       try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
-      const ok=await flyToMatch(f=>{
-        const type=(f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||'').toString();
-        if(!(/IfcSpace/i.test(type) || /(\b|^)(space|room)\b/i.test(type))) return false;
-        const pnames=['Name','name','LongName','Room'];
-        for(const k of pnames){ const v=f.getProperty(k); if(v && String(v).toLowerCase().includes(name.toLowerCase())) return true; }
-        return false;
-      },{duration:0.9});
-      if(!ok) viewer.flyTo(tileset,{duration:0.8});
     });
 
-    // ===================== Stats & Floors =====================
+    // ===================== Stats & Floors (grid sampling, no private APIs) =====================
     const seen=new Set(); const counts={windows:0,doors:0}; const storeys=new Map(); const roomsByStorey=new Map();
+
     function considerFeature(f){
-      const guid=f.getProperty('IfcGuid')||f.getProperty('GlobalId')||f.getProperty('elementId'); if(guid&&seen.has(guid)) return; if(guid) seen.add(guid);
-      const type=(f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||f.getProperty('Type')||'').toString();
-      const name=(f.getProperty('Name')||f.getProperty('name')||f.getProperty('LongName')||'').toString();
-      const storey=(f.getProperty('Storey')||f.getProperty('Level')||f.getProperty('BuildingStorey')||f.getProperty('Floor')||'').toString();
+      let guid; try { guid=f.getProperty('IfcGuid')||f.getProperty('GlobalId')||f.getProperty('elementId'); } catch {}
+      if(guid&&seen.has(guid)) return; if(guid) seen.add(guid);
+      const type=(()=>{ try { return (f.getProperty('IfcType')||f.getProperty('ifcClass')||f.getProperty('class')||f.getProperty('Type')||'').toString(); } catch { return ''; } })();
+      const name=(()=>{ try { return (f.getProperty('Name')||f.getProperty('name')||f.getProperty('LongName')||'').toString(); } catch { return ''; } })();
+      const storey=(()=>{ try { return (f.getProperty('Storey')||f.getProperty('Level')||f.getProperty('BuildingStorey')||f.getProperty('Floor')||'').toString(); } catch { return ''; } })();
       if(/IfcWindow/i.test(type) || /(\b|^)window\b/i.test(type)) counts.windows++;
       if(/IfcDoor/i.test(type) || /(\b|^)door\b/i.test(type)) counts.doors++;
       if(storey){ storeys.set(storey,(storeys.get(storey)||0)+1); }
-      if(/IfcSpace/i.test(type) || /(\b|^)(space|room)\b/i.test(type)){ const key=storey||'(No Storey)'; if(!roomsByStorey.has(key)) roomsByStorey.set(key,new Set()); if(name) roomsByStorey.get(key).add(name); }
+      if(/IfcSpace/i.test(type) || /(\b|^)(space|room)\b/i.test(type)){
+        const key=storey||'(No Storey)';
+        if(!roomsByStorey.has(key)) roomsByStorey.set(key,new Set());
+        if(name) roomsByStorey.get(key).add(name);
+      }
     }
-    function processTile(tile){ const c=tile.content; const n=c?.featuresLength||0; for(let i=0;i<n;i++){ considerFeature(c.getFeature(i)); } }
-    function refreshStatsBox(){ const levels=[...storeys.keys()].sort(); let lines=`Windows: ${counts.windows} | Doors: ${counts.doors}`; if(levels.length){ lines+=`\nStoreys (${levels.length}):`; for(const lv of levels){ lines+=`\n- ${lv}: ${storeys.get(lv)} elemen`; } } statsBox.textContent=lines; }
-    function renderLevelsPanel(){ const el=document.getElementById('levelsPanel'); if(!roomsByStorey.size){ el.textContent='(Tidak ada data ruang terdeteksi)'; return; } let html=''; for(const [level,rooms] of roomsByStorey){ html+=`<div style="margin:6px 0; font-weight:600;">${level}</div>`; const arr=Array.from(rooms).sort(); html+=`<div style=\"display:flex; flex-wrap:wrap; gap:4px;\">`+arr.map(r=>`<button class=\"room-btn\" data-room=\"${r.replace(/"/g,'&quot;')}\">${r}</button>`).join('')+`</div>`;} el.innerHTML=html; el.querySelectorAll('.room-btn').forEach(btn=>{ btn.addEventListener('click', async ()=>{ const name=btn.getAttribute('data-room'); roomInput.value=name; const pat=name.replace(/'/g,"\\'"); const conditions=[["regexp('"+pat+"','i').test(${Name}) || regexp('"+pat+"','i').test(${LongName}) || regexp('"+pat+"','i').test(${Room})","color('orange',1.0)"],["true","color('white',0.85)"]]; try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{} const ok=await flyToMatch(f=>{ const pnames=['Name','name','LongName','Room']; for(const k of pnames){ const v=f.getProperty(k); if(v&&String(v).toLowerCase()===name.toLowerCase()) return true; } return false; },{duration:0.9}); if(!ok) viewer.flyTo(tileset,{duration:0.8}); }); }); }
+
+    function refreshStatsBox(){
+      const levels=[...storeys.keys()].sort();
+      let lines=`Windows: ${counts.windows} | Doors: ${counts.doors}`;
+      if(levels.length){ lines+=`\nStoreys (${levels.length}):`; for(const lv of levels){ lines+=`\n- ${lv}: ${storeys.get(lv)} elemen`; } }
+      statsBox.textContent=lines;
+    }
+
+    function renderLevelsPanel(){
+      const el=document.getElementById('levelsPanel');
+      if(!roomsByStorey.size){ el.textContent='(Tidak ada data ruang terdeteksi)'; return; }
+      let html='';
+      for(const [level,rooms] of roomsByStorey){
+        html+=`<div style="margin:6px 0; font-weight:600;">${level}</div>`;
+        const arr=Array.from(rooms).sort();
+        html+=`<div style="display:flex; flex-wrap:wrap; gap:4px;">`+
+          arr.map(r=>`<button class="room-btn" data-room="${r.replace(/"/g,'&quot;')}">${r}</button>`).join('')+
+          `</div>`;
+      }
+      el.innerHTML=html;
+      el.querySelectorAll('.room-btn').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          el.querySelectorAll('.room-btn').forEach(b=>b.classList.remove('active'));
+          btn.classList.add('active');
+          const name=btn.getAttribute('data-room');
+          roomInput.value=name;
+          const pat=name.replace(/'/g,"\\'");
+          const conditions=[["regexp('"+pat+"','i').test(${Name}) || regexp('"+pat+"','i').test(${LongName}) || regexp('"+pat+"','i').test(${Room})","color('orange',1.0)"],["true","color('white',0.85)"]];
+          try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
+        });
+      });
+    }
 
     document.getElementById('btnScan').addEventListener('click',()=>{
       seen.clear(); counts.windows=0; counts.doors=0; storeys.clear(); roomsByStorey.clear();
-      viewer.scene.frameState.commandList; tileset._selectedTiles && tileset._selectedTiles.forEach(t=>processTile(t));
-      tileset.tileVisible.addEventListener(processTile);
-      refreshStatsBox(); renderLevelsPanel();
-      const dd=document.getElementById('floorFilter'); const cur=dd.value; dd.innerHTML='<option value="">All</option>' + [...storeys.keys()].sort().map(lv=>`<option value="${lv.replace(/"/g,'&quot;')}">${lv}</option>`).join(''); if([...storeys.keys()].includes(cur)) dd.value=cur;
+
+      // Grid-sample the canvas to gather a representative set of features without private APIs
+      const w=viewer.canvas.clientWidth, h=viewer.canvas.clientHeight;
+      const steps=10;
+      for(let iy=1; iy<steps; iy++){
+        for(let ix=1; ix<steps; ix++){
+          const pt=new Cesium.Cartesian2(Math.round((ix/steps)*w),Math.round((iy/steps)*h));
+          const picked=viewer.scene.drillPick(pt);
+          for(const p of picked){ if(typeof p.getProperty!=='function') continue; try { considerFeature(p); } catch {} }
+        }
+      }
+
+      refreshStatsBox();
+      renderLevelsPanel();
+
+      // Populate floor dropdown
+      const dd=document.getElementById('floorFilter');
+      const cur=dd.value;
+      dd.innerHTML='<option value="">All</option>' + [...storeys.keys()].sort().map(lv=>`<option value="${lv.replace(/"/g,'&quot;')}">${lv}</option>`).join('');
+      if([...storeys.keys()].includes(cur)) dd.value=cur;
     });
 
     (document.getElementById('btnFloor')||{}).addEventListener?.('click',()=>{
-      const dd=document.getElementById('floorFilter'); const lv=(dd&&dd.value?dd.value.trim():'');
-      if(!lv){ try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions:[["true","color('white',0.85)"]]}});}catch{} return; }
-      const pat=lv.replace(/'/g,"\\'"); const conditions=[["regexp('"+pat+"','i').test(${Storey}) || regexp('"+pat+"','i').test(${Level}) || regexp('"+pat+"','i').test(${BuildingStorey}) || regexp('"+pat+"','i').test(${Floor})","color('yellow',1.0)"],["true","color('white',0.2)"]];
+      const dd=document.getElementById('floorFilter');
+      const lv=(dd&&dd.value?dd.value.trim():'');
+      if(!lv){
+        try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions:[["true","color('white',0.85)"]]}});}catch{}
+        return;
+      }
+      const pat=lv.replace(/'/g,"\\'");
+      const conditions=[["regexp('"+pat+"','i').test(${Storey}) || regexp('"+pat+"','i').test(${Level}) || regexp('"+pat+"','i').test(${BuildingStorey}) || regexp('"+pat+"','i').test(${Floor})","color('yellow',1.0)"],["true","color('white',0.2)"]];
       try{ tileset.style=new Cesium.Cesium3DTileStyle({color:{conditions}});}catch{}
     });
 
